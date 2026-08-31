@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Action Recorder",
+  "version": "1.0.0",
+  "description": "Record clicks and values filled into inputs on any page, then export them as JSON or replay them.",
+  "permissions": ["storage", "scripting", "tabs", "activeTab"],
+  "host_permissions": ["http://*/", "https://*/"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Action Recorder",
+    "default_icon": {
+      "16": "icons/icon128.png",
+      "48": "icons/icon128.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon128.png",
+    "48": "icons/icon128.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

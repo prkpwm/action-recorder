@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Action Recorder</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+    <div class="container">
+
+        <header class="header">
+            <div class="title">
+                <h3>⚡ Action Recorder</h3>
+                <span id="statusDot" class="dot"></span>
+            </div>
+            <p id="statusLine" class="status-line">Ready</p>
+        </header>
+
+        <div class="controls">
+            <button id="startStopBtn" class="btn primary">▶ Start Recording</button>
+
+            <div class="row">
+                <button id="replayBtn" class="btn" title="Replay the recorded steps on the active tab">▶ Replay</button>
+                <button id="stopReplayBtn" class="btn" title="Stop the running replay">⏹ Stop Replay</button>
+            </div>
+
+            <div class="row">
+                <button id="exportBtn" class="btn accent" title="Download the recording as a JSON file">⬇ Export JSON</button>
+                <button id="clearBtn" class="btn danger" title="Clear all recorded steps">🗑 Clear</button>
+            </div>
+        </div>
+
+        <div id="meta" class="meta"></div>
+
+        <div id="stepList" class="list"></div>
+
+        <div id="status" class="msg"></div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+
+</html>
