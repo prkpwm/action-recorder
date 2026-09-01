@@ -207,8 +207,8 @@ async function editStep(suiteName, stepIndex, patch) {
   const session = stored[key];
   if (!session || !Array.isArray(session.steps)) return { ok: false, error: 'Session not found.' };
   if (stepIndex < 0 || stepIndex >= session.steps.length) return { ok: false, error: 'Step index out of range.' };
-  // Only allow editing safe fields: selector, value, text, href
-  const allowed = ['selector', 'value', 'text', 'href'];
+  // Only allow editing safe fields: selector, value, text, href, delay
+  const allowed = ['selector', 'value', 'text', 'href', 'delay'];
   for (const field of allowed) {
     if (Object.prototype.hasOwnProperty.call(patch, field)) {
       session.steps[stepIndex][field] = patch[field];

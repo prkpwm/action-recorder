@@ -183,22 +183,43 @@
     }
   }
 
+  // ------------------------------------------------------------- inline edit modal
+  let _editResolve = null;
+
+  function openEditModal(step) {
+    return new Promise((resolve) => {
+      _editResolve = resolve;
+
+      const isFill = step.type === 'fill';
+      const valLabel = isFill ? 'Value' : step.href ? 'Href' : 'Text';
+
+      $('editValLabel').textContent = valLabel;
+      $('editSelector').value = step.selector || '';
+      $('editValue').value = isFill ? (step.value || '') : (step.text || step.href || '');
+      $('editDelay').value = step.delay != null ? String(step.delay) : '0';
+
+      $('editModal').removeAttribute('hidden');
+      $('editSelector').focus();
+    });
+  }
+
+  function closeEditModal(result) {
+    $('editModal').setAttribute('hidden', '');
+    if (_editResolve) { _editResolve(result); _editResolve = null; }
+  }
+
   async function editStep(index, step) {
-    // Build a multi-line prompt showing all editable fields
+    const result = await openEditModal(step);
+    if (!result) return; // cancelled
+
     const isFill = step.type === 'fill';
-    const currentVal = isFill ? (step.value || '') : (step.text || step.href || '');
-    const valLabel = isFill ? 'value' : step.href ? 'href' : 'text';
-
-    const newSelector = prompt('Selector:', step.selector);
-    if (newSelector === null) return; // cancelled
-
-    const newVal = prompt(`${valLabel}:`, currentVal);
-    if (newVal === null) return; // cancelled
-
-    const patch = { selector: newSelector.trim() };
-    if (isFill) patch.value = newVal;
-    else if (step.href) patch.href = newVal;
-    else patch.text = newVal;
+    const patch = {
+      selector: result.selector,
+      delay: Math.max(0, parseInt(result.delay, 10) || 0)
+    };
+    if (isFill) patch.value = result.value;
+    else if (step.href) patch.href = result.value;
+    else patch.text = result.value;
 
     const res = await sendMsg('EDIT_STEP', { suiteName: activeSuite, stepIndex: index, patch });
     if (res.ok) {
@@ -386,6 +407,26 @@
     $('stopReplayBtn').addEventListener('click', stopReplay);
     $('exportBtn').addEventListener('click', exportJson);
     $('clearBtn').addEventListener('click', clearCurrent);
+
+    // Edit modal
+    $('editSaveBtn').addEventListener('click', () => {
+      closeEditModal({
+        selector: $('editSelector').value.trim(),
+        value: $('editValue').value,
+        delay: $('editDelay').value
+      });
+    });
+    $('editCancelBtn').addEventListener('click', () => closeEditModal(null));
+    $('editModal').addEventListener('click', (e) => {
+      if (e.target === $('editModal')) closeEditModal(null); // click backdrop to cancel
+    });
+    // Save on Enter in either field
+    [$('editSelector'), $('editValue'), $('editDelay')].forEach((inp) => {
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') $('editSaveBtn').click();
+        if (e.key === 'Escape') closeEditModal(null);
+      });
+    });
 
     // Suite bar
     $('suiteDropdown').addEventListener('change', (e) => switchSuite(e.target.value));

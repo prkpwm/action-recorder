@@ -394,3 +394,69 @@ h3 {
     color: #fff;
 }
 /* ---- Live hover selector strip removed (shown on-page overlay instead) ---- */
+
+/* ---- Inline step edit modal ---- */
+.modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal[hidden] {
+    display: none;
+}
+
+.modal-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    width: 320px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.modal-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 2px;
+}
+
+.modal-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--subtle);
+    margin-bottom: -4px;
+}
+
+.modal-input {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: Consolas, Monaco, 'Courier New', monospace;
+    font-size: 12px;
+    color: var(--text);
+    background: #f9fafb;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 7px 9px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+.modal-input:focus {
+    border-color: var(--primary);
+    background: #eff6ff;
+}
+
+.modal-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+}
