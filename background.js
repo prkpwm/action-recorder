@@ -92,10 +92,11 @@ async function broadcast(message) {
 
 // ------------------------------------------------------------- replay
 
-async function startReplay(tabId) {
-  if (!await sendToTab(tabId, { type: 'SET_REPLAY', value: true })) {
+async function startReplay(tabId, urlPattern, urlIsRegex) {
+  const msg = { type: 'SET_REPLAY', value: true, urlPattern: urlPattern || '', urlIsRegex: !!urlIsRegex };
+  if (!await sendToTab(tabId, msg)) {
     await ensureContentScript(tabId);
-    await sendToTab(tabId, { type: 'SET_REPLAY', value: true });
+    await sendToTab(tabId, msg);
   }
   return { ok: true };
 }
@@ -284,7 +285,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse(await stopRecording());
         break;
       case 'START_REPLAY':
-        sendResponse(await startReplay(message.tabId));
+        sendResponse(await startReplay(message.tabId, message.urlPattern, message.urlIsRegex));
         break;
       case 'STOP_REPLAY':
         sendResponse(await stopReplay());
@@ -321,6 +322,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'EDIT_STEP':
         sendResponse(await editStep(message.suiteName, message.stepIndex, message.patch));
         break;
+      case 'SAVE_SESSION_URL': {
+        const key = suiteKey(message.suiteName);
+        const stored = await chrome.storage.local.get(key);
+        const session = stored[key];
+        if (!session) { sendResponse({ ok: false, error: 'Session not found.' }); break; }
+        session.urlPattern = message.pattern;
+        session.urlIsRegex = !!message.isRegex;
+        await chrome.storage.local.set({ [key]: session });
+        sendResponse({ ok: true });
+        break;
+      }
 
       // Events from content scripts — relay to the popup if open.
       case 'STEP_RECORDED':

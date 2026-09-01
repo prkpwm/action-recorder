@@ -141,7 +141,17 @@
     if (!session.steps) session.steps = [];
     if (!session.url) session.url = location.href;
     session.url = location.href;
-    session.steps.push(step);
+
+    // If this is a fill step and the last step is also a fill on the same selector,
+    // update in place instead of appending (collapses rapid typing into one step).
+    const last = session.steps[session.steps.length - 1];
+    if (step.type === 'fill' && last && last.type === 'fill' && last.selector === step.selector) {
+      last.value = step.value;
+      last.timestamp = step.timestamp;
+      // keep the original delay (time from previous distinct action)
+    } else {
+      session.steps.push(step);
+    }
 
     await storageSet({ [key]: session });
     safeSend({ type: 'STEP_RECORDED', data: step });
@@ -365,8 +375,28 @@
 
   let replayCancel = false;
 
-  async function runReplay() {
+  async function runReplay(urlPattern, urlIsRegex) {
     if (!ctxOk()) return;
+
+    // --- URL guard
+    if (urlPattern) {
+      let matches = false;
+      try {
+        matches = urlIsRegex
+          ? new RegExp(urlPattern).test(location.href)
+          : location.href.startsWith(urlPattern) || location.href === urlPattern;
+      } catch (e) {
+        matches = false;
+      }
+      if (!matches) {
+        safeSend({
+          type: 'REPLAY_EVENT',
+          data: { level: 'error', step: 0, text: `URL mismatch — expected: ${urlPattern}  got: ${location.href}` }
+        });
+        safeSend({ type: 'REPLAY_FINISHED' });
+        return;
+      }
+    }
     // Read the active suite's session.
     const { arActiveSuite } = await storageGet('arActiveSuite');
     const suiteName = arActiveSuite || 'suite1';
@@ -379,6 +409,20 @@
 
     replaying = true;
     replayCancel = false;
+
+    // Wait for the page body to have actual content (Angular/Vue hydration)
+    let bodyReady = false;
+    for (let w = 0; w < 20; w++) {
+      if (document.body && document.body.children.length > 0) { bodyReady = true; break; }
+      await waitFor(500);
+    }
+    if (!bodyReady) {
+      safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: 0, text: 'Page DOM did not become ready in time.' } });
+      replaying = false;
+      safeSend({ type: 'REPLAY_FINISHED' });
+      return;
+    }
+
     safeSend({ type: 'REPLAY_STARTED' });
 
     const steps = session.steps;
@@ -391,7 +435,25 @@
 
       const el = document.querySelector(step.selector);
       if (!el) {
-        safeSend({ type: 'REPLAY_EVENT', data: { level: 'warn', step: i + 1, text: `Element not found: ${step.selector}` } });
+        // Retry up to 3x with 1s gap before giving up (handles slow Angular/Vue renders)
+        let found = null;
+        for (let r = 0; r < 3; r++) {
+          await waitFor(1000);
+          if (replayCancel) break;
+          found = document.querySelector(step.selector);
+          if (found) break;
+        }
+        if (!found) {
+          safeSend({ type: 'REPLAY_EVENT', data: { level: 'warn', step: i + 1, text: `Element not found: ${step.selector}` } });
+          continue;
+        }
+        try {
+          if (step.type === 'click') clickElement(found);
+          else if (step.type === 'fill') fillElement(found, step);
+        } catch (err) {
+          safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: i + 1, text: `Step ${i + 1} failed: ${err}` } });
+        }
+        await waitFor(250);
         continue;
       }
       try {
@@ -408,9 +470,9 @@
   }
 
   // ------------------------------------------------------------- messaging
-  function setReplay(value) {
+  function setReplay(value, urlPattern, urlIsRegex) {
     if (value) {
-      if (!replaying) runReplay();
+      if (!replaying) runReplay(urlPattern, urlIsRegex);
     } else {
       replayCancel = true;
       replaying = false;
@@ -423,7 +485,7 @@
       setRecording(!!message.value);
       sendResponse({ ok: true });
     } else if (message.type === 'SET_REPLAY') {
-      setReplay(!!message.value);
+      setReplay(!!message.value, message.urlPattern, message.urlIsRegex);
       sendResponse({ ok: true });
     }
   });

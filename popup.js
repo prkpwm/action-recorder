@@ -97,11 +97,22 @@
     // --- meta line
     const meta = $('meta');
     const parts = [];
-    if (currentSession && currentSession.url) parts.push(`URL: ${currentSession.url}`);
     if (currentSession && currentSession.startedAt) parts.push(`Start: ${fmtTime(currentSession.startedAt)}`);
     if (currentSession && currentSession.endedAt) parts.push(`End: ${fmtTime(currentSession.endedAt)}`);
     if (steps.length) parts.push(`Steps: ${steps.length}`);
     meta.textContent = parts.join('  ·  ');
+
+    // --- URL row
+    const urlRow = $('urlRow');
+    if (currentSession) {
+      urlRow.removeAttribute('hidden');
+      const isRegex = !!currentSession.urlIsRegex;
+      $('urlInput').value = currentSession.urlPattern || currentSession.url || '';
+      $('urlRegexBtn').classList.toggle('active', isRegex);
+      $('urlRegexBtn').title = isRegex ? 'Regex mode ON — click to switch to plain URL' : 'Plain URL — click to enable regex mode';
+    } else {
+      urlRow.setAttribute('hidden', '');
+    }
 
     // --- suite controls
     renderSuiteBar();
@@ -246,6 +257,28 @@
     }
   }
 
+  // ------------------------------------------------------------- URL pattern
+  async function saveUrlPattern() {
+    if (!currentSession) return;
+    const pattern = $('urlInput').value.trim();
+    const isRegex = $('urlRegexBtn').classList.contains('active');
+
+    // Validate regex if regex mode is on
+    if (isRegex) {
+      try { new RegExp(pattern); }
+      catch (e) { showStatus('Invalid regex: ' + e.message, true); return; }
+    }
+
+    const res = await sendMsg('SAVE_SESSION_URL', { suiteName: activeSuite, pattern, isRegex });
+    if (res.ok) {
+      currentSession.urlPattern = pattern;
+      currentSession.urlIsRegex = isRegex;
+      showStatus('URL pattern saved.');
+    } else {
+      showStatus(res.error || 'Failed to save URL.', true);
+    }
+  }
+
   // ------------------------------------------------------------- suite actions
   async function switchSuite(name) {
     const res = await sendMsg('SWITCH_SUITE', { suiteName: name });
@@ -328,8 +361,19 @@
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab || tab.id == null) { showStatus('No active tab found.', true); return; }
     if (!/^https?:/.test(tab.url || '')) { showStatus('Cannot replay on this page type.', true); return; }
-    const res = await sendMsg('START_REPLAY', { tabId: tab.id });
-    showStatus(res.ok ? 'Replaying…' : 'Failed to start replay.', !res.ok);
+    const res = await sendMsg('START_REPLAY', {
+      tabId: tab.id,
+      urlPattern: currentSession.urlPattern || currentSession.url || '',
+      urlIsRegex: !!currentSession.urlIsRegex
+    });
+    if (res.ok) {
+      isReplaying = true;
+      setReplayProgress(0, currentSession.steps.length, '');
+      showStatus('Replaying…');
+      render();
+    } else {
+      showStatus('Failed to start replay.', true);
+    }
   }
 
   async function stopReplay() {
@@ -427,6 +471,15 @@
     $('stopReplayBtn').addEventListener('click', stopReplay);
     $('exportBtn').addEventListener('click', exportJson);
     $('clearBtn').addEventListener('click', clearCurrent);
+
+    // URL pattern row
+    $('urlSaveBtn').addEventListener('click', saveUrlPattern);
+    $('urlRegexBtn').addEventListener('click', () => {
+      $('urlRegexBtn').classList.toggle('active');
+    });
+    $('urlInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') saveUrlPattern();
+    });
 
     // Edit modal
     $('editSaveBtn').addEventListener('click', () => {
