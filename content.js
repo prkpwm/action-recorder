@@ -301,8 +301,7 @@
       steps: []
     };
     if (!session.steps) session.steps = [];
-    if (!session.url) session.url = location.href;
-    session.url = location.href;
+    if (!session.url) session.url = location.href;  // set from first step only
 
     // If this is a fill step and the last step is also a fill on the same selector,
     // update in place instead of appending (collapses rapid typing into one step).
@@ -329,7 +328,6 @@
     recordStep({
       type: 'fill',
       selector: getBestSelector(el),
-      xpath: getXPath(el),
       name: el.getAttribute('name') || el.getAttribute('id') || '',
       value: isCheck ? String(el.checked) : String(el.value)
     });
@@ -366,7 +364,6 @@
       recordStep({
         type: 'select',
         selector: getBestSelector(trigger),
-        xpath: getXPath(trigger),
         value: optValue,
         optionText: optText
       });
@@ -408,7 +405,7 @@
       }
     }
 
-    recordStep({ type: 'click', selector: getBestSelector(el), xpath: getXPath(el), ...elInfo(el) });
+    recordStep({ type: 'click', selector: getBestSelector(el), ...elInfo(el) });
   }
 
   function handleInput(e) {
@@ -431,7 +428,6 @@
       recordStep({
         type: 'select',
         selector: getBestSelector(el),
-        xpath: getXPath(el),
         name: el.getAttribute('name') || el.getAttribute('id') || '',
         value: String(el.value),
         optionText: optText
@@ -448,9 +444,8 @@
     if (el === lastHoverEl) return;
     lastHoverEl = el;
     const selector = getBestSelector(el);
-    const xpath = getXPath(el);
     positionOverlay(el, selector);
-    safeSend({ type: 'HOVER_SELECTOR', selector, xpath });
+    safeSend({ type: 'HOVER_SELECTOR', selector });
   }
 
   function clearHover() {
@@ -513,9 +508,7 @@
     overlay.style.display = 'block';
 
     if (hoverLabel) {
-      // Prefix XPath selectors in the label for clarity
-      const display = (selector && selector.startsWith('/')) ? `xpath: ${selector}` : (selector || '');
-      hoverLabel.textContent = display;
+      hoverLabel.textContent = selector || '';
       const labelH = hoverLabel.offsetHeight || 20;
 
       // Prefer above the top border; fall back to inside-top if no room
@@ -817,8 +810,9 @@
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   }
 
-  // Resolve a step's element — try CSS selector first, then XPath fallback.
-  // If the stored selector IS an XPath (starts with / or //) use xpath eval directly.
+  // Resolve a step's element via its selector.
+  // If the stored selector is an XPath (starts with / or //) evaluate it directly;
+  // otherwise use document.querySelector (CSS selector).
   function resolveElement(step) {
     let el = null;
     if (step.selector) {
@@ -827,11 +821,8 @@
       } else {
         try {
           el = document.querySelector(step.selector);
-        } catch (e) { /* invalid CSS selector — fall through to xpath */ }
+        } catch (e) { /* invalid CSS selector */ }
       }
-    }
-    if (!el && step.xpath) {
-      el = queryByXPath(step.xpath);
     }
 
     // For 'select' steps on Ant Design: if the stored selector resolved to the inner
