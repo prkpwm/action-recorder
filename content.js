@@ -1040,7 +1040,22 @@
       const key = suiteKey(suiteName);
       const stored = await storageGet(key);
       const session = stored[key];
-      if (session && session.url !== location.href) {
+      if (session && session.urlIsRegex !== undefined) {
+        // Session already has regex metadata — just update the stored url to the
+        // current href only when it doesn't already match the recorded urlPattern.
+        let currentUrlMatches = false;
+        try {
+          currentUrlMatches = session.urlIsRegex
+            ? new RegExp(session.urlPattern || session.url).test(location.href)
+            : location.href.startsWith(session.urlPattern || session.url) ||
+              location.href === (session.urlPattern || session.url);
+        } catch (e) { /* invalid regex — fall back to exact compare */ }
+        if (!currentUrlMatches) {
+          session.url = location.href;
+          await storageSet({ [key]: session });
+        }
+      } else if (session && session.url !== location.href) {
+        // Legacy session without urlIsRegex metadata — keep plain URL fresh.
         session.url = location.href;
         await storageSet({ [key]: session });
       }
