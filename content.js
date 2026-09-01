@@ -385,6 +385,7 @@
     for (let i = 0; i < steps.length; i++) {
       if (replayCancel) break;
       const step = steps[i];
+      safeSend({ type: 'REPLAY_STEP', data: { current: i + 1, total: steps.length, selector: step.selector, stepType: step.type } });
       await waitFor(step.delay > 0 ? Math.min(step.delay, 10000) : 500);
       if (replayCancel) break;
 

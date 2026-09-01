@@ -63,6 +63,18 @@
             </div>
         </div>
 
+        <!-- Replay progress bar — visible while replaying -->
+        <div id="replayProgress" class="replay-progress" hidden>
+            <div class="replay-progress__header">
+                <span class="replay-progress__label">▶ Replaying</span>
+                <span id="replayProgressCount" class="replay-progress__count">0 / 0</span>
+            </div>
+            <div class="replay-progress__track">
+                <div id="replayProgressBar" class="replay-progress__bar" style="width:0%"></div>
+            </div>
+            <div id="replayProgressSel" class="replay-progress__sel"></div>
+        </div>
+
         <!-- Live hover selector removed — selector is shown on the page overlay instead -->
 
         <div id="meta" class="meta"></div>

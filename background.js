@@ -325,6 +325,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Events from content scripts — relay to the popup if open.
       case 'STEP_RECORDED':
       case 'REPLAY_STARTED':
+      case 'REPLAY_STEP':
       case 'REPLAY_FINISHED':
       case 'REPLAY_EVENT':
       case 'HOVER_SELECTOR':

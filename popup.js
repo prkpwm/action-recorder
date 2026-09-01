@@ -10,6 +10,7 @@
   let suites = ['suite1'];
   let activeSuite = 'suite1';
   let statusTimer = null;
+  let isReplaying = false;
 
   // ------------------------------------------------------------- messaging
   const sendMsg = (type, data = {}) =>
@@ -23,7 +24,20 @@
     el.textContent = text;
     el.className = 'msg ' + (isError ? 'error' : 'info');
     clearTimeout(statusTimer);
-    if (text) statusTimer = setTimeout(() => { el.textContent = ''; }, 4000);
+    // Don't auto-clear while a replay is running — the message stays until replay ends
+    if (text && !isReplaying) statusTimer = setTimeout(() => { el.textContent = ''; }, 4000);
+  }
+
+  function setReplayProgress(current, total, selector) {
+    const wrap = $('replayProgress');
+    if (current == null) {
+      wrap.setAttribute('hidden', '');
+      return;
+    }
+    wrap.removeAttribute('hidden');
+    $('replayProgressCount').textContent = `${current} / ${total}`;
+    $('replayProgressBar').style.width = `${Math.round((current / total) * 100)}%`;
+    $('replayProgressSel').textContent = selector || '';
   }
 
   function fmtTime(ts) {
@@ -61,8 +75,8 @@
     }
 
     // --- action buttons
-    $('replayBtn').disabled = steps.length === 0 || recordingState.active;
-    $('stopReplayBtn').disabled = steps.length === 0;
+    $('replayBtn').disabled = steps.length === 0 || recordingState.active || isReplaying;
+    $('stopReplayBtn').disabled = !isReplaying;
     $('exportBtn').disabled = steps.length === 0;
     $('clearBtn').disabled = steps.length === 0 && !recordingState.active;
 
@@ -72,6 +86,9 @@
     if (recordingState.active) {
       dot.classList.add('on');
       line.textContent = `Recording — ${activeSuite}`;
+    } else if (isReplaying) {
+      dot.classList.add('on');
+      line.textContent = `Replaying — ${activeSuite}`;
     } else {
       dot.classList.remove('on');
       line.textContent = 'Ready';
@@ -317,7 +334,10 @@
 
   async function stopReplay() {
     const res = await sendMsg('STOP_REPLAY');
+    isReplaying = false;
+    setReplayProgress(null);
     showStatus(res.ok ? 'Replay stopped.' : 'Nothing to stop.', !res.ok);
+    render();
   }
 
   // ------------------------------------------------------------- export
@@ -450,11 +470,23 @@
 
   // Relay events from content scripts (via background) while popup is open.
   chrome.runtime.onMessage.addListener((message) => {
-    if (message.type === 'REPLAY_STARTED') showStatus('Replay started.');
-    else if (message.type === 'REPLAY_FINISHED') showStatus('Replay finished.');
-    else if (message.type === 'REPLAY_EVENT') {
+    if (message.type === 'REPLAY_STARTED') {
+      isReplaying = true;
+      setReplayProgress(0, (currentSession && currentSession.steps.length) || 0, '');
+      showStatus('Replaying…');
+      render();
+    } else if (message.type === 'REPLAY_STEP') {
       const d = message.data || {};
-      showStatus(`Replay step ${d.step}: ${d.text}`, d.level === 'error');
+      setReplayProgress(d.current, d.total, d.selector);
+      showStatus(`Step ${d.current} / ${d.total} — ${d.stepType}`);
+    } else if (message.type === 'REPLAY_FINISHED') {
+      isReplaying = false;
+      setReplayProgress(null);
+      showStatus('Replay finished.');
+      render();
+    } else if (message.type === 'REPLAY_EVENT') {
+      const d = message.data || {};
+      showStatus(`Step ${d.step}: ${d.text}`, d.level === 'error' || d.level === 'warn');
     } else if (message.type === 'HOVER_SELECTOR') {
       // selector shown on-page overlay only — nothing to do in popup
     }
