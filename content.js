@@ -94,6 +94,29 @@
       const s = `[aria-label="${attr(label)}"]`;
       if (document.querySelectorAll(s).length === 1) return s;
     }
+
+    // Try meaningful class names (skip Angular-generated ones like _ngcontent-*)
+    const classes = Array.from(el.classList).filter(
+      (c) => !/^_ng|^ng-|^cdk-|^mat-mdc/.test(c) && c.length > 2
+    );
+    if (classes.length > 0) {
+      // Try the full meaningful class combo first (most specific)
+      const multi = `${tag}.${classes.map(esc).join('.')}`;
+      if (document.querySelectorAll(multi).length === 1) return multi;
+
+      // Try each class individually
+      for (const c of classes) {
+        const s = `${tag}.${esc(c)}`;
+        if (document.querySelectorAll(s).length === 1) return s;
+      }
+
+      // Try class alone (without tag) for uniqueness
+      for (const c of classes) {
+        const s = `.${esc(c)}`;
+        if (document.querySelectorAll(s).length === 1) return s;
+      }
+    }
+
     return getCssPath(el);
   }
 
