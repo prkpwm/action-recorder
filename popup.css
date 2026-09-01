@@ -275,3 +275,80 @@ h3 {
     border: none;
     background: none;
 }
+
+/* ---- Suite bar ---- */
+.suite-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    margin-bottom: 10px;
+}
+
+.suite-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--subtle);
+    white-space: nowrap;
+}
+
+.suite-select {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    background: #f3f4f6;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 6px;
+    cursor: pointer;
+    outline: none;
+}
+
+.suite-select:focus {
+    border-color: var(--primary);
+    background: #eff6ff;
+}
+
+.suite-select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.suite-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    background: #f3f4f6;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.suite-btn:hover:not(:disabled) {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+}
+
+.suite-btn--danger:hover:not(:disabled) {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
+}
+
+.suite-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}

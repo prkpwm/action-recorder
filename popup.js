@@ -4,15 +4,20 @@
 
   const $ = (id) => document.getElementById(id);
 
+  // ------------------------------------------------------------- state
   let currentSession = null;
   let recordingState = { active: false, tabId: null, url: '', startedAt: 0 };
+  let suites = ['suite1'];
+  let activeSuite = 'suite1';
   let statusTimer = null;
 
+  // ------------------------------------------------------------- messaging
   const sendMsg = (type, data = {}) =>
     chrome.runtime.sendMessage({ type, ...data })
-      .then((res) => !!(res && res.ok))
-      .catch(() => false);
+      .then((res) => res || { ok: false })
+      .catch(() => ({ ok: false }));
 
+  // ------------------------------------------------------------- status
   function showStatus(text, isError = false) {
     const el = $('status');
     el.textContent = text;
@@ -28,17 +33,24 @@
     });
   }
 
-  // ----------------------------- storage -> UI
+  // ------------------------------------------------------------- refresh / render
   async function refresh() {
-    const data = await chrome.storage.local.get(['arSession', 'arRecording']);
-    currentSession = data.arSession || null;
-    recordingState = data.arRecording || { active: false, tabId: null, url: '', startedAt: 0 };
+    const { arRecording } = await chrome.storage.local.get('arRecording');
+    recordingState = arRecording || { active: false, tabId: null, url: '', startedAt: 0 };
+
+    const res = await sendMsg('GET_SESSION_INFO');
+    if (res.ok) {
+      currentSession = res.session;
+      suites = res.suites || ['suite1'];
+      activeSuite = res.active || 'suite1';
+    }
     render();
   }
 
   function render() {
     const steps = (currentSession && currentSession.steps) || [];
 
+    // --- recording button
     const btn = $('startStopBtn');
     if (recordingState.active) {
       btn.textContent = '⏹ Stop Recording';
@@ -48,21 +60,24 @@
       btn.classList.remove('recording');
     }
 
+    // --- action buttons
     $('replayBtn').disabled = steps.length === 0 || recordingState.active;
     $('stopReplayBtn').disabled = steps.length === 0;
     $('exportBtn').disabled = steps.length === 0;
     $('clearBtn').disabled = steps.length === 0 && !recordingState.active;
 
+    // --- status dot
     const dot = $('statusDot');
     const line = $('statusLine');
     if (recordingState.active) {
       dot.classList.add('on');
-      line.textContent = 'Recording active';
+      line.textContent = `Recording — ${activeSuite}`;
     } else {
       dot.classList.remove('on');
       line.textContent = 'Ready';
     }
 
+    // --- meta line
     const meta = $('meta');
     const parts = [];
     if (currentSession && currentSession.url) parts.push(`URL: ${currentSession.url}`);
@@ -71,7 +86,29 @@
     if (steps.length) parts.push(`Steps: ${steps.length}`);
     meta.textContent = parts.join('  ·  ');
 
+    // --- suite controls
+    renderSuiteBar();
     renderList(steps);
+  }
+
+  function renderSuiteBar() {
+    const dropdown = $('suiteDropdown');
+    // Rebuild options, preserving selection
+    dropdown.innerHTML = '';
+    for (const s of suites) {
+      const opt = document.createElement('option');
+      opt.value = s;
+      opt.textContent = s;
+      if (s === activeSuite) opt.selected = true;
+      dropdown.appendChild(opt);
+    }
+
+    // Disable suite controls while recording
+    dropdown.disabled = recordingState.active;
+    $('newSuiteBtn').disabled = recordingState.active;
+    $('editSuiteBtn').disabled = recordingState.active;
+    $('deleteSuiteBtn').disabled = recordingState.active || suites.length <= 1;
+    $('importSuiteBtn').disabled = recordingState.active;
   }
 
   function renderList(steps) {
@@ -118,11 +155,67 @@
     });
   }
 
-  // ----------------------------- actions
+  // ------------------------------------------------------------- suite actions
+  async function switchSuite(name) {
+    const res = await sendMsg('SWITCH_SUITE', { suiteName: name });
+    if (res.ok) {
+      activeSuite = name;
+      await refresh();
+    } else {
+      showStatus(res.error || 'Failed to switch suite.', true);
+    }
+  }
+
+  async function addSuite() {
+    const name = prompt('Name for the new suite:');
+    if (!name || !name.trim()) return;
+    const res = await sendMsg('ADD_SUITE', { suiteName: name.trim() });
+    if (res.ok) {
+      suites = res.suites;
+      activeSuite = res.active;
+      showStatus(`Suite "${res.active}" created.`);
+      await refresh();
+    } else {
+      showStatus(res.error || 'Failed to add suite.', true);
+    }
+  }
+
+  async function editSuite() {
+    const newName = prompt('Rename suite to:', activeSuite);
+    if (!newName || !newName.trim() || newName.trim() === activeSuite) return;
+    const res = await sendMsg('RENAME_SUITE', { oldName: activeSuite, newName: newName.trim() });
+    if (res.ok) {
+      suites = res.suites;
+      activeSuite = res.active;
+      showStatus(`Suite renamed to "${activeSuite}".`);
+      await refresh();
+    } else {
+      showStatus(res.error || 'Failed to rename suite.', true);
+    }
+  }
+
+  async function deleteSuite() {
+    if (suites.length <= 1) {
+      showStatus('Cannot delete the last suite.', true);
+      return;
+    }
+    if (!confirm(`Delete suite "${activeSuite}" and all its recorded steps?`)) return;
+    const res = await sendMsg('DELETE_SUITE', { suiteName: activeSuite });
+    if (res.ok) {
+      suites = res.suites;
+      activeSuite = res.active;
+      showStatus('Suite deleted.');
+      await refresh();
+    } else {
+      showStatus(res.error || 'Failed to delete suite.', true);
+    }
+  }
+
+  // ------------------------------------------------------------- recording actions
   async function toggleRecording() {
     if (recordingState.active) {
-      const ok = await sendMsg('STOP_RECORDING');
-      showStatus(ok ? 'Recording stopped.' : 'Failed to stop recording.', !ok);
+      const res = await sendMsg('STOP_RECORDING');
+      showStatus(res.ok ? 'Recording stopped.' : 'Failed to stop recording.', !res.ok);
     } else {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab || tab.id == null) { showStatus('No active tab found.', true); return; }
@@ -130,26 +223,30 @@
         showStatus('Cannot record on this page type (chrome://, etc).', true);
         return;
       }
-      const ok = await sendMsg('START_RECORDING', { tabId: tab.id });
-      showStatus(ok ? 'Recording started — click & type on the page.' : 'Failed to start recording.', !ok);
+      const res = await sendMsg('START_RECORDING', { tabId: tab.id });
+      showStatus(res.ok ? `Recording into "${activeSuite}" — click & type on the page.` : 'Failed to start recording.', !res.ok);
     }
     await refresh();
   }
 
   async function replay() {
-    if (!currentSession || !currentSession.steps.length) { showStatus('Nothing to replay.', true); return; }
+    if (!currentSession || !currentSession.steps || !currentSession.steps.length) {
+      showStatus('Nothing to replay.', true);
+      return;
+    }
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab || tab.id == null) { showStatus('No active tab found.', true); return; }
     if (!/^https?:/.test(tab.url || '')) { showStatus('Cannot replay on this page type.', true); return; }
-    const ok = await sendMsg('START_REPLAY', { tabId: tab.id });
-    showStatus(ok ? 'Replaying…' : 'Failed to start replay.', !ok);
+    const res = await sendMsg('START_REPLAY', { tabId: tab.id });
+    showStatus(res.ok ? 'Replaying…' : 'Failed to start replay.', !res.ok);
   }
 
   async function stopReplay() {
-    const ok = await sendMsg('STOP_REPLAY');
-    showStatus(ok ? 'Replay stopped.' : 'Nothing to stop.', !ok);
+    const res = await sendMsg('STOP_REPLAY');
+    showStatus(res.ok ? 'Replay stopped.' : 'Nothing to stop.', !res.ok);
   }
 
+  // ------------------------------------------------------------- export
   function exportJson() {
     if (!currentSession || !currentSession.steps || !currentSession.steps.length) {
       showStatus('Nothing to export.', true);
@@ -160,40 +257,101 @@
     const a = document.createElement('a');
     a.href = url;
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    a.download = `action-recording-${ts}.json`;
+    a.download = `action-recording-${activeSuite}-${ts}.json`;
     document.body.appendChild(a);
     a.click();
-    setTimeout(() => {
-      URL.revokeObjectURL(url);
-      a.remove();
-    }, 200);
-    showStatus(`Exported ${currentSession.steps.length} steps as JSON.`);
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 200);
+    showStatus(`Exported ${currentSession.steps.length} steps (${activeSuite}).`);
   }
 
-  async function clearAll() {
-    if (recordingState.active) {
-      if (!confirm('Stop recording and clear all steps?')) return;
-    } else if (currentSession && currentSession.steps && currentSession.steps.length) {
-      if (!confirm('Clear all recorded steps?')) return;
+  // ------------------------------------------------------------- import
+  async function importSuite(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    // Reset so the same file can be re-imported if needed
+    event.target.value = '';
+
+    let parsed;
+    try {
+      parsed = JSON.parse(await file.text());
+    } catch {
+      showStatus('Invalid JSON file.', true);
+      return;
     }
-    const ok = await sendMsg('CLEAR_SESSION');
-    showStatus(ok ? 'Cleared.' : 'Failed to clear.', !ok);
+
+    // Accept either a bare session object { steps, suiteName, ... }
+    // or the full export wrapper that exportJson produces (same shape).
+    if (!parsed || !Array.isArray(parsed.steps)) {
+      showStatus('File does not contain a valid suite (missing steps array).', true);
+      return;
+    }
+
+    // Determine the default name: prefer the file's suiteName field, then the filename stem.
+    const defaultName = parsed.suiteName
+      || file.name.replace(/\.json$/i, '').replace(/^action-recording-/, '').replace(/-\d{4}-\d{2}-\d{2}.*$/, '')
+      || 'imported';
+
+    // If a suite with that name already exists, ask whether to overwrite or pick a new name.
+    let targetName = defaultName;
+    if (suites.includes(targetName)) {
+      const choice = prompt(
+        `Suite "${targetName}" already exists.\nEnter a new name to keep both, or leave as-is to overwrite:`,
+        targetName
+      );
+      if (choice === null) return; // cancelled
+      targetName = choice.trim() || targetName;
+    }
+
+    const res = await sendMsg('IMPORT_SUITE', { session: parsed, suiteName: targetName });
+    if (res.ok) {
+      suites = res.suites;
+      activeSuite = res.active;
+      showStatus(`Imported "${targetName}" (${parsed.steps.length} steps).`);
+      await refresh();
+    } else {
+      showStatus(res.error || 'Import failed.', true);
+    }
+  }
+
+  // ------------------------------------------------------------- clear
+  async function clearCurrent() {
+    const hasSteps = currentSession && currentSession.steps && currentSession.steps.length;
+    if (recordingState.active) {
+      if (!confirm(`Stop recording and clear all steps in "${activeSuite}"?`)) return;
+    } else if (hasSteps) {
+      if (!confirm(`Clear all recorded steps in "${activeSuite}"?`)) return;
+    }
+    const res = await sendMsg('CLEAR_SESSION', { suiteName: activeSuite });
+    showStatus(res.ok ? `"${activeSuite}" cleared.` : 'Failed to clear.', !res.ok);
     await refresh();
   }
 
-  // ----------------------------- init
+  // ------------------------------------------------------------- init
   document.addEventListener('DOMContentLoaded', async () => {
     $('startStopBtn').addEventListener('click', toggleRecording);
     $('replayBtn').addEventListener('click', replay);
     $('stopReplayBtn').addEventListener('click', stopReplay);
     $('exportBtn').addEventListener('click', exportJson);
-    $('clearBtn').addEventListener('click', clearAll);
+    $('clearBtn').addEventListener('click', clearCurrent);
+
+    // Suite bar
+    $('suiteDropdown').addEventListener('change', (e) => switchSuite(e.target.value));
+    $('newSuiteBtn').addEventListener('click', addSuite);
+    $('editSuiteBtn').addEventListener('click', editSuite);
+    $('deleteSuiteBtn').addEventListener('click', deleteSuite);
+    $('importSuiteBtn').addEventListener('click', () => $('importSuiteFile').click());
+    $('importSuiteFile').addEventListener('change', importSuite);
+
     await refresh();
   });
 
   // Live updates while the popup is open.
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && (changes.arSession || changes.arRecording)) refresh();
+    if (area !== 'local') return;
+    const relevant = Object.keys(changes).some(
+      (k) => k === 'arRecording' || k === 'arActiveSuite' || k === 'arSuites' || k.startsWith('arSession__')
+    );
+    if (relevant) refresh();
   });
 
   // Relay events from content scripts (via background) while popup is open.

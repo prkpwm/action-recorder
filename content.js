@@ -98,6 +98,11 @@
   }
 
   // ------------------------------------------------------------- recording
+  // Returns the storage key for a given suite name's session data.
+  function suiteKey(suiteName) {
+    return `arSession__${suiteName}`;
+  }
+
   async function recordStep(step) {
     const now = Date.now();
     const delay = lastStepTime ? Math.min(Math.round(now - lastStepTime), 60000) : 0;
@@ -110,19 +115,23 @@
     };
     Object.assign(step, base);
 
-    const { arRecording, arSession } = await storageGet(['arRecording', 'arSession']);
-    const activeInfo = arRecording && arRecording.active ? arRecording : null;
-    let session = arSession || {
+    const { arRecording, arActiveSuite } = await storageGet(['arRecording', 'arActiveSuite']);
+    const suiteName = arActiveSuite || 'suite1';
+    const key = suiteKey(suiteName);
+
+    const stored = await storageGet(key);
+    let session = stored[key] || {
+      suiteName,
       url: location.href,
-      startedAt: activeInfo ? activeInfo.startedAt : now,
+      startedAt: arRecording && arRecording.startedAt ? arRecording.startedAt : now,
       steps: []
     };
     if (!session.steps) session.steps = [];
     if (!session.url) session.url = location.href;
-    if (session.url !== location.href) session.url = location.href;
+    session.url = location.href;
     session.steps.push(step);
 
-    await storageSet({ arSession: session });
+    await storageSet({ [key]: session });
     safeSend({ type: 'STEP_RECORDED', data: step });
   }
 
@@ -149,8 +158,6 @@
 
     const tag = el.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
-      // Form fields are captured by the fill handler; but keep "button-ish"
-      // inputs (type=submit/button/reset/image) as clicks.
       const t = (el.type || '').toLowerCase();
       if (!(tag === 'INPUT' && (t === 'submit' || t === 'button' || t === 'reset' || t === 'image'))) {
         return;
@@ -234,7 +241,8 @@
       detachListeners();
     }
   }
-// ------------------------------------------------------------- replay
+
+  // ------------------------------------------------------------- replay
   function flash(el) {
     el.classList.add(FLASH_CLS);
     setTimeout(() => el.classList.remove(FLASH_CLS), 900);
@@ -273,15 +281,21 @@
   let replayCancel = false;
 
   async function runReplay() {
-    const { arSession } = await storageGet('arSession');
-    if (!arSession || !arSession.steps || !arSession.steps.length) return;
-    if (recording) setRecording(false); // don't re-record our own actions
+    // Read the active suite's session.
+    const { arActiveSuite } = await storageGet('arActiveSuite');
+    const suiteName = arActiveSuite || 'suite1';
+    const key = suiteKey(suiteName);
+    const stored = await storageGet(key);
+    const session = stored[key];
+
+    if (!session || !session.steps || !session.steps.length) return;
+    if (recording) setRecording(false);
 
     replaying = true;
     replayCancel = false;
     safeSend({ type: 'REPLAY_STARTED' });
 
-    const steps = arSession.steps;
+    const steps = session.steps;
     for (let i = 0; i < steps.length; i++) {
       if (replayCancel) break;
       const step = steps[i];
@@ -332,12 +346,15 @@
     if (arRecording && arRecording.active && !recording) {
       setRecording(true);
       // Session may have started on a previous page: keep the URL fresh.
-      const { arSession } = await storageGet('arSession');
-      if (arSession && arSession.url !== location.href) {
-        arSession.url = location.href;
-        await storageSet({ arSession });
+      const { arActiveSuite } = await storageGet('arActiveSuite');
+      const suiteName = arActiveSuite || 'suite1';
+      const key = suiteKey(suiteName);
+      const stored = await storageGet(key);
+      const session = stored[key];
+      if (session && session.url !== location.href) {
+        session.url = location.href;
+        await storageSet({ [key]: session });
       }
     }
   })();
 })();
-  

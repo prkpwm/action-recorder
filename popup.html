@@ -18,6 +18,37 @@
             <p id="statusLine" class="status-line">Ready</p>
         </header>
 
+        <!-- Suite selector bar -->
+        <div class="suite-bar">
+            <label class="suite-label" for="suiteDropdown">Suite:</label>
+            <select id="suiteDropdown" class="suite-select"></select>
+            <button id="newSuiteBtn" class="suite-btn" title="New suite">
+                <!-- plus icon -->
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+                    <path d="M11 13H5V11H11V5H13V11H19V13H13V19H11V13Z"/>
+                </svg>
+            </button>
+            <button id="editSuiteBtn" class="suite-btn" title="Rename suite">
+                <!-- pencil icon -->
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+                    <path d="M5 19H6.4L15.025 10.375L13.625 8.975L5 17.6V19ZM19.3 8.925L15.05 4.725L16.45 3.325C16.833 2.942 17.304 2.75 17.863 2.75C18.421 2.75 18.892 2.942 19.275 3.325L20.675 4.725C21.058 5.108 21.25 5.579 21.25 6.137C21.25 6.696 21.058 7.167 20.675 7.55L19.3 8.925ZM17.85 10.4L7.25 21H3V16.75L13.6 6.15L17.85 10.4Z"/>
+                </svg>
+            </button>
+            <button id="deleteSuiteBtn" class="suite-btn suite-btn--danger" title="Delete suite">
+                <!-- trash icon -->
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+                    <path d="M7 21C6.45 21 5.979 20.804 5.587 20.412C5.195 20.02 5 19.55 5 19V6H4V4H9V3H15V4H20V6H19V19C19 19.55 18.804 20.021 18.412 20.413C18.02 20.805 17.55 21 17 21H7Z"/>
+                </svg>
+            </button>
+            <button id="importSuiteBtn" class="suite-btn" title="Import suite from JSON">
+                <!-- upload icon -->
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+                    <path d="M11 16V7.825L8.4 10.4L7 9L12 4L17 9L15.6 10.4L13 7.825V16H11ZM5 20C4.45 20 3.979 19.804 3.587 19.412C3.195 19.02 3 18.55 3 18V15H5V18H19V15H21V18C21 18.55 20.804 19.021 20.412 19.413C20.02 19.805 19.55 20 19 20H5Z"/>
+                </svg>
+            </button>
+            <input type="file" id="importSuiteFile" accept=".json" style="display:none">
+        </div>
+
         <div class="controls">
             <button id="startStopBtn" class="btn primary">▶ Start Recording</button>
 
@@ -27,8 +58,8 @@
             </div>
 
             <div class="row">
-                <button id="exportBtn" class="btn accent" title="Download the recording as a JSON file">⬇ Export JSON</button>
-                <button id="clearBtn" class="btn danger" title="Clear all recorded steps">🗑 Clear</button>
+                <button id="exportBtn" class="btn accent" title="Download the active suite as a JSON file">⬇ Export JSON</button>
+                <button id="clearBtn" class="btn danger" title="Clear recorded steps for the active suite">🗑 Clear</button>
             </div>
         </div>
 
