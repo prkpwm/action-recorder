@@ -58,7 +58,45 @@
       suites = res.suites || ['suite1'];
       activeSuite = res.active || 'suite1';
     }
+
+    // Auto-select the suite whose urlPattern matches the current tab URL,
+    // but only when not recording (don't interrupt an active session).
+    if (!recordingState.active && suites.length > 1) {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+      if (tab && tab.url && /^https?:/.test(tab.url)) {
+        const matched = await findMatchingSuite(suites, tab.url);
+        if (matched && matched !== activeSuite) {
+          const switchRes = await sendMsg('SWITCH_SUITE', { suiteName: matched });
+          if (switchRes.ok) {
+            activeSuite = matched;
+            const infoRes = await sendMsg('GET_SESSION_INFO');
+            if (infoRes.ok) currentSession = infoRes.session;
+          }
+        }
+      }
+    }
+
     render();
+  }
+
+  // Load all suite sessions and return the name of the first one whose
+  // urlPattern/urlIsRegex matches the given URL. Returns null if none match.
+  async function findMatchingSuite(suiteNames, url) {
+    const keys = suiteNames.map((n) => `arSession__${n}`);
+    const stored = await chrome.storage.local.get(keys);
+    for (const name of suiteNames) {
+      const session = stored[`arSession__${name}`];
+      if (!session) continue;
+      const pattern = session.urlPattern || session.url || '';
+      if (!pattern) continue;
+      try {
+        const matches = session.urlIsRegex
+          ? new RegExp(pattern).test(url)
+          : url.startsWith(pattern) || url === pattern;
+        if (matches) return name;
+      } catch (e) { /* invalid regex — skip */ }
+    }
+    return null;
   }
 
   function render() {
