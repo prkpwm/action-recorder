@@ -4,8 +4,19 @@
   if (window.__actionRecorderInjected) return;
   window.__actionRecorderInjected = true;
 
-  const storageGet = (keys) => chrome.storage.local.get(keys);
-  const storageSet = (obj) => chrome.storage.local.set(obj);
+  // Returns true when the extension context is still valid.
+  function ctxOk() {
+    try { return !!chrome.runtime?.id; } catch { return false; }
+  }
+
+  const storageGet = (keys) => {
+    if (!ctxOk()) return Promise.reject(new Error('context invalidated'));
+    return chrome.storage.local.get(keys);
+  };
+  const storageSet = (obj) => {
+    if (!ctxOk()) return Promise.reject(new Error('context invalidated'));
+    return chrome.storage.local.set(obj);
+  };
 
   // ------------------------------------------------------------- state
   let recording = false;
@@ -15,7 +26,6 @@
   const lastInputValues = new WeakMap();
 
   const STYLE_ID = 'ar-style';
-  const HOVER_CLS = 'ar-record-hover';
   const FLASH_CLS = 'ar-flash';
 
   // ------------------------------------------------------------- utils
@@ -25,6 +35,7 @@
   const trimmed = (s) => (s || '').replace(/\s+/g, ' ').trim();
 
   function safeSend(message) {
+    if (!ctxOk()) return;
     try {
       const p = chrome.runtime.sendMessage(message);
       if (p && typeof p.catch === 'function') p.catch(() => {});
@@ -104,6 +115,7 @@
   }
 
   async function recordStep(step) {
+    if (!ctxOk()) return;
     const now = Date.now();
     const delay = lastStepTime ? Math.min(Math.round(now - lastStepTime), 60000) : 0;
     lastStepTime = now;
@@ -190,22 +202,94 @@
     const el = e.target;
     if (!(el instanceof Element)) return;
     if (el === lastHoverEl) return;
-    clearHover();
-    el.classList.add(HOVER_CLS);
     lastHoverEl = el;
+    const selector = getBestSelector(el);
+    positionOverlay(el, selector);
+    safeSend({ type: 'HOVER_SELECTOR', selector });
   }
 
   function clearHover() {
-    if (lastHoverEl) lastHoverEl.classList.remove(HOVER_CLS);
     lastHoverEl = null;
+    hideOverlay();
+    if (recording) safeSend({ type: 'HOVER_SELECTOR', selector: '' });
   }
 
+  // ------------------------------------------------------------- hover overlay (full border + selector label)
+  let hoverOverlay = null;
+  let hoverLabel = null;
+
+  function getOrCreateOverlay() {
+    if (hoverOverlay) return hoverOverlay;
+
+    hoverOverlay = document.createElement('div');
+    hoverOverlay.id = 'ar-hover-overlay';
+    hoverOverlay.style.cssText = [
+      'position:fixed',
+      'pointer-events:none',
+      'z-index:2147483647',
+      'box-sizing:border-box',
+      'border:2px dashed #ff5722',
+      'border-radius:4px',
+      'display:none'
+    ].join(';');
+
+    hoverLabel = document.createElement('span');
+    hoverLabel.style.cssText = [
+      'position:absolute',
+      'left:-2px',
+      'background:#ff5722',
+      'color:#fff',
+      'font-family:Consolas,Monaco,"Courier New",monospace',
+      'font-size:11px',
+      'line-height:1.3',
+      'padding:2px 6px',
+      'border-radius:3px 3px 3px 0',
+      'white-space:nowrap',
+      'max-width:360px',
+      'overflow:hidden',
+      'text-overflow:ellipsis',
+      'pointer-events:none'
+    ].join(';');
+
+    hoverOverlay.appendChild(hoverLabel);
+    document.documentElement.appendChild(hoverOverlay);
+    return hoverOverlay;
+  }
+
+  function positionOverlay(el, selector) {
+    const overlay = getOrCreateOverlay();
+    const r = el.getBoundingClientRect();
+
+    // Size the overlay to exactly cover the element
+    overlay.style.top    = (r.top  - 2) + 'px';
+    overlay.style.left   = (r.left - 2) + 'px';
+    overlay.style.width  = (r.width  + 4) + 'px';
+    overlay.style.height = (r.height + 4) + 'px';
+    overlay.style.display = 'block';
+
+    if (hoverLabel) {
+      hoverLabel.textContent = selector || '';
+      const labelH = hoverLabel.offsetHeight || 20;
+
+      // Prefer above the top border; fall back to inside-top if no room
+      if (r.top - 2 >= labelH + 2) {
+        hoverLabel.style.top    = (-labelH - 2) + 'px';
+        hoverLabel.style.bottom = '';
+      } else {
+        hoverLabel.style.top    = '2px';
+        hoverLabel.style.bottom = '';
+      }
+    }
+  }
+
+  function hideOverlay() {
+    if (hoverOverlay) hoverOverlay.style.display = 'none';
+  }
   function ensureStyle() {
     if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement('style');
     style.id = STYLE_ID;
     style.textContent = `
-      .${HOVER_CLS} { outline: 2px dashed #ff5722 !important; outline-offset: 2px !important; }
       .${FLASH_CLS} { outline: 3px solid #4caf50 !important; outline-offset: 2px !important; border-radius: 3px; }
     `;
     (document.head || document.documentElement).appendChild(style);
@@ -227,6 +311,7 @@
     document.removeEventListener('mouseover', handleOver, true);
     document.removeEventListener('mouseout', clearHover, true);
     clearHover();
+    if (hoverOverlay) { hoverOverlay.remove(); hoverOverlay = null; hoverLabel = null; }
     const style = document.getElementById(STYLE_ID);
     if (style) style.remove();
   }
@@ -281,6 +366,7 @@
   let replayCancel = false;
 
   async function runReplay() {
+    if (!ctxOk()) return;
     // Read the active suite's session.
     const { arActiveSuite } = await storageGet('arActiveSuite');
     const suiteName = arActiveSuite || 'suite1';
@@ -331,6 +417,7 @@
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!ctxOk()) return;
     if (message.type === 'SET_RECORDING') {
       setRecording(!!message.value);
       sendResponse({ ok: true });
@@ -342,6 +429,7 @@
 
   // ------------------------------------------------------------- init
   (async () => {
+    if (!ctxOk()) return;
     const { arRecording } = await storageGet('arRecording');
     if (arRecording && arRecording.active && !recording) {
       setRecording(true);

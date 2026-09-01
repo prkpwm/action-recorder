@@ -190,6 +190,34 @@ async function getSessionInfo() {
   return { ok: true, session: stored[key] || null, suites, active };
 }
 
+async function deleteStep(suiteName, stepIndex) {
+  const key = suiteKey(suiteName);
+  const stored = await chrome.storage.local.get(key);
+  const session = stored[key];
+  if (!session || !Array.isArray(session.steps)) return { ok: false, error: 'Session not found.' };
+  if (stepIndex < 0 || stepIndex >= session.steps.length) return { ok: false, error: 'Step index out of range.' };
+  session.steps.splice(stepIndex, 1);
+  await chrome.storage.local.set({ [key]: session });
+  return { ok: true };
+}
+
+async function editStep(suiteName, stepIndex, patch) {
+  const key = suiteKey(suiteName);
+  const stored = await chrome.storage.local.get(key);
+  const session = stored[key];
+  if (!session || !Array.isArray(session.steps)) return { ok: false, error: 'Session not found.' };
+  if (stepIndex < 0 || stepIndex >= session.steps.length) return { ok: false, error: 'Step index out of range.' };
+  // Only allow editing safe fields: selector, value, text, href
+  const allowed = ['selector', 'value', 'text', 'href'];
+  for (const field of allowed) {
+    if (Object.prototype.hasOwnProperty.call(patch, field)) {
+      session.steps[stepIndex][field] = patch[field];
+    }
+  }
+  await chrome.storage.local.set({ [key]: session });
+  return { ok: true };
+}
+
 async function clearSession(suiteName) {
   // Clear only the specified suite's session (default: active suite).
   const { arActiveSuite } = await chrome.storage.local.get('arActiveSuite');
@@ -287,12 +315,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'CLEAR_ALL_SUITES':
         sendResponse(await clearAllSuites());
         break;
+      case 'DELETE_STEP':
+        sendResponse(await deleteStep(message.suiteName, message.stepIndex));
+        break;
+      case 'EDIT_STEP':
+        sendResponse(await editStep(message.suiteName, message.stepIndex, message.patch));
+        break;
 
       // Events from content scripts — relay to the popup if open.
       case 'STEP_RECORDED':
       case 'REPLAY_STARTED':
       case 'REPLAY_FINISHED':
       case 'REPLAY_EVENT':
+      case 'HOVER_SELECTOR':
         chrome.runtime.sendMessage(message).catch(() => {});
         sendResponse({ ok: true });
         break;

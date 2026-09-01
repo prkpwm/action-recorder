@@ -352,3 +352,45 @@ h3 {
     opacity: 0.35;
     cursor: not-allowed;
 }
+
+/* ---- Per-step action buttons ---- */
+.step-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.step:hover .step-actions {
+    opacity: 1;
+}
+
+.step-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: #f3f4f6;
+    color: var(--subtle);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.step-btn--edit:hover {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+}
+
+.step-btn--del:hover {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
+}
+/* ---- Live hover selector strip removed (shown on-page overlay instead) ---- */

@@ -150,9 +150,62 @@
 
       body.appendChild(sel);
       if (val.textContent) body.appendChild(val);
-      row.append(idx, badge, body);
+
+      // --- action buttons
+      const actions = document.createElement('div');
+      actions.className = 'step-actions';
+
+      const editBtn = document.createElement('button');
+      editBtn.className = 'step-btn step-btn--edit';
+      editBtn.title = 'Edit step';
+      editBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><path d="M5 19H6.4L15.025 10.375L13.625 8.975L5 17.6V19ZM19.3 8.925L15.05 4.725L16.45 3.325C16.833 2.942 17.304 2.75 17.863 2.75C18.421 2.75 18.892 2.942 19.275 3.325L20.675 4.725C21.058 5.108 21.25 5.579 21.25 6.137C21.25 6.696 21.058 7.167 20.675 7.55L19.3 8.925ZM17.85 10.4L7.25 21H3V16.75L13.6 6.15L17.85 10.4Z"/></svg>';
+      editBtn.addEventListener('click', () => editStep(i, step));
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'step-btn step-btn--del';
+      delBtn.title = 'Delete step';
+      delBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><path d="M7 21C6.45 21 5.979 20.804 5.587 20.412C5.195 20.02 5 19.55 5 19V6H4V4H9V3H15V4H20V6H19V19C19 19.55 18.804 20.021 18.412 20.413C18.02 20.805 17.55 21 17 21H7Z"/></svg>';
+      delBtn.addEventListener('click', () => deleteStep(i));
+
+      actions.append(editBtn, delBtn);
+      row.append(idx, badge, body, actions);
       list.appendChild(row);
     });
+  }
+
+  // ------------------------------------------------------------- step edit / delete
+  async function deleteStep(index) {
+    const res = await sendMsg('DELETE_STEP', { suiteName: activeSuite, stepIndex: index });
+    if (res.ok) {
+      await refresh();
+    } else {
+      showStatus(res.error || 'Failed to delete step.', true);
+    }
+  }
+
+  async function editStep(index, step) {
+    // Build a multi-line prompt showing all editable fields
+    const isFill = step.type === 'fill';
+    const currentVal = isFill ? (step.value || '') : (step.text || step.href || '');
+    const valLabel = isFill ? 'value' : step.href ? 'href' : 'text';
+
+    const newSelector = prompt('Selector:', step.selector);
+    if (newSelector === null) return; // cancelled
+
+    const newVal = prompt(`${valLabel}:`, currentVal);
+    if (newVal === null) return; // cancelled
+
+    const patch = { selector: newSelector.trim() };
+    if (isFill) patch.value = newVal;
+    else if (step.href) patch.href = newVal;
+    else patch.text = newVal;
+
+    const res = await sendMsg('EDIT_STEP', { suiteName: activeSuite, stepIndex: index, patch });
+    if (res.ok) {
+      await refresh();
+    } else {
+      showStatus(res.error || 'Failed to edit step.', true);
+    }
   }
 
   // ------------------------------------------------------------- suite actions
@@ -361,6 +414,8 @@
     else if (message.type === 'REPLAY_EVENT') {
       const d = message.data || {};
       showStatus(`Replay step ${d.step}: ${d.text}`, d.level === 'error');
+    } else if (message.type === 'HOVER_SELECTOR') {
+      // selector shown on-page overlay only — nothing to do in popup
     }
   });
 })();
