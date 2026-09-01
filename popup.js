@@ -11,6 +11,7 @@
   let activeSuite = 'suite1';
   let statusTimer = null;
   let isReplaying = false;
+  let autoSelectDone = false; // only auto-select on first popup open, not on storage-change refreshes
 
   // ------------------------------------------------------------- messaging
   const sendMsg = (type, data = {}) =>
@@ -67,8 +68,10 @@
     }
 
     // Auto-select the suite whose urlPattern matches the current tab URL,
-    // but only when not recording (don't interrupt an active session).
-    if (!recordingState.active && suites.length > 1) {
+    // but only once on popup open — not on every storage-change refresh.
+    // This prevents auto-select from overriding the user's manual suite choice.
+    if (!autoSelectDone && !recordingState.active && suites.length > 1) {
+      autoSelectDone = true;
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
       if (tab && tab.url && /^https?:/.test(tab.url)) {
         const matched = await findMatchingSuite(suites, tab.url);
