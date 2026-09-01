@@ -338,6 +338,20 @@ h3 {
     outline: none;
 }
 
+.suite-select optgroup {
+    font-style: normal;
+    font-weight: 700;
+    color: var(--subtle);
+    font-size: 11px;
+}
+
+.suite-select optgroup option {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 12px;
+    padding-left: 4px;
+}
+
 .suite-select:focus {
     border-color: var(--primary);
     background: #eff6ff;

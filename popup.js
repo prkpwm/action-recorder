@@ -47,6 +47,13 @@
     });
   }
 
+  // Returns the display label for a suite: just the part after the last '/'
+  // so 'a/test1' → 'test1', 'suite1' → 'suite1'.
+  function suiteShortName(name) {
+    const slash = name.lastIndexOf('/');
+    return slash === -1 ? name : name.slice(slash + 1);
+  }
+
   // ------------------------------------------------------------- refresh / render
   async function refresh() {
     const { arRecording } = await chrome.storage.local.get('arRecording');
@@ -123,10 +130,10 @@
     const line = $('statusLine');
     if (recordingState.active) {
       dot.classList.add('on');
-      line.textContent = `Recording — ${activeSuite}`;
+      line.textContent = `Recording — ${suiteShortName(activeSuite)}`;
     } else if (isReplaying) {
       dot.classList.add('on');
-      line.textContent = `Replaying — ${activeSuite}`;
+      line.textContent = `Replaying — ${suiteShortName(activeSuite)}`;
     } else {
       dot.classList.remove('on');
       line.textContent = 'Ready';
@@ -159,14 +166,46 @@
 
   function renderSuiteBar() {
     const dropdown = $('suiteDropdown');
-    // Rebuild options, preserving selection
+    // Rebuild options grouped by the prefix before the first '/'
+    // e.g. ['suite1', 'a/test1', 'a/test2', 'b/x'] →
+    //   (root)  suite1
+    //   a/      test1, test2
+    //   b/      x
     dropdown.innerHTML = '';
+
+    // Partition into root (no slash) and groups (has slash)
+    const rootSuites = suites.filter((s) => !s.includes('/'));
+    const grouped = {};   // { groupPrefix: [fullName, ...] }
     for (const s of suites) {
+      if (!s.includes('/')) continue;
+      const slash = s.indexOf('/');
+      const prefix = s.slice(0, slash);
+      if (!grouped[prefix]) grouped[prefix] = [];
+      grouped[prefix].push(s);
+    }
+
+    // Root suites — no optgroup wrapper
+    for (const s of rootSuites) {
       const opt = document.createElement('option');
       opt.value = s;
       opt.textContent = s;
       if (s === activeSuite) opt.selected = true;
       dropdown.appendChild(opt);
+    }
+
+    // Grouped suites — one <optgroup> per prefix, label is "prefix/"
+    for (const prefix of Object.keys(grouped).sort()) {
+      const group = document.createElement('optgroup');
+      group.label = prefix + '/';
+      for (const s of grouped[prefix]) {
+        const opt = document.createElement('option');
+        opt.value = s;
+        // Show only the short name after the slash inside the group
+        opt.textContent = s.slice(prefix.length + 1);
+        if (s === activeSuite) opt.selected = true;
+        group.appendChild(opt);
+      }
+      dropdown.appendChild(group);
     }
 
     // Disable suite controls while recording
