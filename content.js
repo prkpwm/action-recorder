@@ -388,6 +388,26 @@
         return;
       }
     }
+
+    // Skip recording clicks on large layout containers (sidebars, navbars, wrappers)
+    // that have no stable identity and contain many children — these are accidental
+    // clicks that produce unplayable steps and pollute the recorded suite.
+    // A container is considered "noise" if it: has children, no id/name/data-testid,
+    // is a block-level div/nav/aside/header/footer, and has >5 children.
+    const noiseTags = new Set(['DIV', 'NAV', 'ASIDE', 'HEADER', 'FOOTER', 'SECTION', 'MAIN', 'UL', 'OL']);
+    if (noiseTags.has(tag)) {
+      const hasStableId = el.id && el.id.trim();
+      const hasTestId = el.getAttribute('data-testid') || el.getAttribute('data-qa');
+      const hasRole = el.getAttribute('role');
+      const isInteractive = el.getAttribute('tabindex') != null || el.getAttribute('aria-expanded') != null;
+      if (!hasStableId && !hasTestId && !hasRole && !isInteractive && el.children.length > 5) {
+        arLog('[AR:handleClick] suppressed — large layout container with no stable identity', {
+          tag, children: el.children.length, class: el.className
+        });
+        return;
+      }
+    }
+
     recordStep({ type: 'click', selector: getBestSelector(el), xpath: getXPath(el), ...elInfo(el) });
   }
 
@@ -560,17 +580,48 @@
     setTimeout(() => el.classList.remove(FLASH_CLS), 900);
   }
 
+  // Simulate real mouse movement by firing mouseenter on every ancestor from
+  // <body> down to el (top-down, as the browser does on actual pointer entry).
+  // This is critical for Angular components that show/expand on (mouseenter) —
+  // e.g. a sidebar that must be hovered before its menu items are clickable.
+  function dispatchHoverChain(el) {
+    // Collect ancestors from body → el
+    const chain = [];
+    let node = el;
+    while (node && node !== document.documentElement) {
+      chain.unshift(node);
+      node = node.parentElement;
+    }
+    for (const ancestor of chain) {
+      ancestor.dispatchEvent(new MouseEvent('mouseover',  { bubbles: true,  cancelable: true, view: window }));
+      ancestor.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, cancelable: true, view: window }));
+    }
+    arLog('[AR:clickElement] hover dispatched on', {
+      tag: el.tagName, id: el.id, class: el.className, text: trimmed(el.textContent).slice(0, 60)
+    });
+  }
+
   function clickElement(el) {
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     flash(el);
     arLog('[AR:clickElement] dispatching mouse events on', {
       tag: el.tagName, id: el.id, class: el.className, text: trimmed(el.textContent).slice(0, 60)
     });
-    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
-      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    // Fire mouseenter on the full ancestor chain first (top-down) so Angular
+    // sidebar/menu components that expand on (mouseenter) are open before the click.
+    dispatchHoverChain(el);
+    // Use native .click() as the primary mechanism — it is trusted in most browsers
+    // and triggers Angular (click) host-listeners, routerLink, and other framework
+    // bindings that ignore synthetic MouseEvent dispatches (isTrusted: false).
+    if (typeof el.click === 'function') {
+      el.click();
+    } else {
+      // Fallback for elements that don't have a native .click() method
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      }
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
     }
-    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-    if (typeof el.click === 'function') el.click();
   }
 
   async function fillElement(el, step) {
@@ -811,6 +862,19 @@
     return el;
   }
 
+  // Returns true when el is a layout container that has no interactive role
+  // and was only recorded because of event bubbling (e.g. sticky-left-menu sidebar).
+  // During replay these should trigger hover only — not a click.
+  function isLayoutContainer(el) {
+    const noiseTags = new Set(['DIV', 'NAV', 'ASIDE', 'HEADER', 'FOOTER', 'SECTION', 'MAIN', 'UL', 'OL']);
+    if (!noiseTags.has(el.tagName)) return false;
+    const hasStableId = el.id && el.id.trim();
+    const hasTestId = el.getAttribute('data-testid') || el.getAttribute('data-qa');
+    const hasRole = el.getAttribute('role');
+    const isInteractive = el.getAttribute('tabindex') != null || el.getAttribute('aria-expanded') != null;
+    return !hasStableId && !hasTestId && !hasRole && !isInteractive && el.children.length > 5;
+  }
+
   let replayCancel = false;
 
   async function runReplay(urlPattern, urlIsRegex) {
@@ -892,7 +956,16 @@
           continue;
         }
         try {
-          if (step.type === 'click') clickElement(found);
+          if (step.type === 'click') {
+            if (isLayoutContainer(found)) {
+              // Hover-only step — sidebar/nav containers expand on mouseenter, not click
+              arLog(`[AR:replay] step ${i + 1} — layout container, hover-only (no click)`);
+              dispatchHoverChain(found);
+              await waitFor(400); // give Angular time to expand
+            } else {
+              clickElement(found);
+            }
+          }
           else if (step.type === 'fill') await fillElement(found, step);
           else if (step.type === 'select') await selectElement(found, step);
         } catch (err) {
@@ -909,7 +982,16 @@
         continue;
       }
       try {
-        if (step.type === 'click') clickElement(el);
+        if (step.type === 'click') {
+          if (isLayoutContainer(el)) {
+            // Hover-only step — sidebar/nav containers expand on mouseenter, not click
+            arLog(`[AR:replay] step ${i + 1} — layout container, hover-only (no click)`);
+            dispatchHoverChain(el);
+            await waitFor(400); // give Angular time to expand
+          } else {
+            clickElement(el);
+          }
+        }
         else if (step.type === 'fill') await fillElement(el, step);
         else if (step.type === 'select') await selectElement(el, step);
       } catch (err) {
