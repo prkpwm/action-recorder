@@ -25,6 +25,17 @@
   let lastStepTime = 0;
   const lastInputValues = new WeakMap();
 
+  // Debug logging — off by default; toggled by the popup "Hide debug logs" checkbox.
+  let arLogEnabled = false;
+  const arLog = (...args) => { if (arLogEnabled) console.log(...args); };
+  const arWarn = (...args) => { if (arLogEnabled) console.warn(...args); };
+  const arError = (...args) => { if (arLogEnabled) console.error(...args); };
+
+  // Read persisted preference immediately (async, best-effort)
+  storageGet('arHideLog').then(({ arHideLog }) => {
+    arLogEnabled = arHideLog === false; // default hide → log disabled
+  }).catch(() => {});
+
   const STYLE_ID = 'ar-style';
   const FLASH_CLS = 'ar-flash';
 
@@ -40,6 +51,52 @@
       const p = chrome.runtime.sendMessage(message);
       if (p && typeof p.catch === 'function') p.catch(() => {});
     } catch (e) { /* context invalidated */ }
+  }
+
+  // Build an absolute XPath for an element (used as fallback selector).
+  function getXPath(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
+    if (el === document.body) return '/html/body';
+
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === Node.ELEMENT_NODE) {
+      // Short-circuit on id — produces a concise absolute path
+      if (node.id) {
+        parts.unshift(`//*[@id="${node.id.replace(/"/g, '\\"')}"]`);
+        return parts.join('/');
+      }
+      const tag = node.tagName.toLowerCase();
+      const parent = node.parentElement;
+      let idx = 1;
+      if (parent) {
+        for (const sib of parent.children) {
+          if (sib === node) break;
+          if (sib.tagName === node.tagName) idx++;
+        }
+        const siblings = Array.from(parent.children).filter(
+          (c) => c.tagName === node.tagName
+        );
+        parts.unshift(siblings.length > 1 ? `${tag}[${idx}]` : tag);
+      } else {
+        parts.unshift(tag);
+      }
+      node = parent;
+    }
+    return '/' + parts.join('/');
+  }
+
+  // Evaluate an XPath expression and return the first matching element.
+  function queryByXPath(xpath) {
+    try {
+      const result = document.evaluate(
+        xpath, document, null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE, null
+      );
+      return result.singleNodeValue || null;
+    } catch (e) {
+      return null;
+    }
   }
 
   // Build a readable, fairly unique CSS path for an element.
@@ -95,6 +152,21 @@
       if (document.querySelectorAll(s).length === 1) return s;
     }
 
+    // Try unique visible text — only for interactive/leaf elements (buttons, links, labels, spans, divs with no child elements)
+    const isLeafLike = !el.children.length ||
+      ['button', 'a', 'label', 'option', 'li', 'td', 'th', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tag);
+    if (isLeafLike) {
+      const txt = trimmed(el.textContent);
+      if (txt && txt.length >= 2 && txt.length <= 80) {
+        // XPath: all elements of this tag whose normalised text equals txt
+        const xp = `//${tag}[normalize-space(.)="${txt.replace(/"/g, '\\"')}"]`;
+        try {
+          const res = document.evaluate(`count(${xp})`, document, null, XPathResult.NUMBER_TYPE, null);
+          if (res.numberValue === 1) return xp;
+        } catch (e) { /* ignore invalid xpath due to special chars */ }
+      }
+    }
+
     // Try meaningful class names (skip Angular-generated ones like _ngcontent-*)
     const classes = Array.from(el.classList).filter(
       (c) => !/^_ng|^ng-|^cdk-|^mat-mdc/.test(c) && c.length > 2
@@ -129,6 +201,73 @@
       href: (el.tagName === 'A' && el.href) ? el.href : (el.getAttribute('href') || ''),
       value: (el.value !== undefined && el.value !== null) ? String(el.value) : ''
     };
+  }
+
+  // ------------------------------------------------------------- dropdown detection helpers
+
+  // Returns the closest custom-dropdown trigger ancestor (mat-select, ng-select, etc.)
+  function getDropdownTrigger(el) {
+    return el.closest(
+      'mat-select, ng-select, .ng-select, [role="combobox"], [role="listbox"], ' +
+      '.p-dropdown, .p-multiselect, select2-container, .select2, ' +
+      'nz-select, .ant-select'
+    );
+  }
+
+  // Returns true when el is an option inside a custom dropdown panel
+  function isCustomOption(el) {
+    return !!(el.closest(
+      'mat-option, mat-select-panel, ng-dropdown-panel, .ng-option, ' +
+      '[role="option"], [role="listbox"] li, .p-dropdown-items li, .select2-results__option, ' +
+      '.cdk-overlay-container mat-option, ' +
+      '.ant-select-item-option, nz-option-item, .ant-select-dropdown nz-option-item-group'
+    ));
+  }
+
+  // Given an option element, find the triggering select element (best effort)
+  function findTriggerForOption(optionEl) {
+    // Angular Material — panel is in overlay; find the open mat-select
+    const matSelect = document.querySelector('mat-select[aria-expanded="true"]')
+      || document.querySelector('mat-select.mat-select-invalid')
+      || document.querySelector('mat-select');
+    if (matSelect) return matSelect;
+
+    // ng-select
+    const ngSelect = document.querySelector('ng-select.ng-select-opened')
+      || document.querySelector('ng-select');
+    if (ngSelect) return ngSelect;
+
+    // Ant Design (nz-select / ant-select) — panel is in a portal overlay
+    // Find the open nz-select by its aria-expanded state or open class
+    const nzSelect = document.querySelector('nz-select.ant-select-open')
+      || document.querySelector('nz-select[nzopen]')
+      || document.querySelector('.ant-select.ant-select-open nz-select')
+      || document.querySelector('nz-select');
+    if (nzSelect) return nzSelect;
+
+    // Generic: look for an ancestor trigger
+    return getDropdownTrigger(optionEl) || optionEl;
+  }
+
+  // For Ant Design: return the nz-select HOST element (Angular host listener lives there).
+  // Never return an inner child — synthetic mousedown on children bypasses ng-zorro's handler.
+  function getAntSelectClickTarget(el) {
+    // Walk up from any inner element (search input, selector div, arrow, etc.)
+    const nzSelect = el.closest('nz-select');
+    if (nzSelect) return nzSelect;
+
+    // Already the host or a plain .ant-select wrapper
+    if (el.tagName === 'NZ-SELECT' || el.classList.contains('ant-select')) return el;
+
+    return el;
+  }
+
+  // Open an ng-zorro nz-select dropdown using the native .click() on the host.
+  // Synthetic MouseEvent dispatch does NOT trigger Angular host listeners on nz-select.
+  function openNzSelect(nzSelectEl) {
+    arLog('[AR:openNzSelect] calling native .click() on', nzSelectEl.tagName, nzSelectEl.getAttribute('name') || nzSelectEl.id);
+    // Native .click() triggers Angular's (click) host binding
+    nzSelectEl.click();
   }
 
   // ------------------------------------------------------------- recording
@@ -190,6 +329,7 @@
     recordStep({
       type: 'fill',
       selector: getBestSelector(el),
+      xpath: getXPath(el),
       name: el.getAttribute('name') || el.getAttribute('id') || '',
       value: isCheck ? String(el.checked) : String(el.value)
     });
@@ -197,9 +337,49 @@
 
   function handleClick(e) {
     if (!recording || replaying) return;
-    const el = e.target;
+    // Use the deepest element at the pointer position — e.target can be a
+    // container when the real click lands on a child (text node, icon, etc.)
+    let el = (typeof e.clientX === 'number' && typeof e.clientY === 'number')
+      ? (document.elementFromPoint(e.clientX, e.clientY) || e.target)
+      : e.target;
     if (!(el instanceof Element)) return;
-    if (el.closest && el.closest('#ar-overlay, .' + FLASH_CLS)) return;
+    if (el.closest && el.closest('#ar-overlay, #ar-hover-overlay, .' + FLASH_CLS)) return;
+
+    // Debug: log every click captured during recording so we can see if synthetic
+    // events from replay's clickElement() accidentally reach this handler.
+    arLog('[AR:handleClick]', {
+      isTrusted: e.isTrusted,
+      type: e.type,
+      tag: el.tagName,
+      id: el.id,
+      class: el.className,
+      recording,
+      replaying,
+      target: el
+    });
+
+    // Custom dropdown option click — record as 'select' step
+    if (isCustomOption(el)) {
+      const optText = trimmed(el.textContent);
+      const optValue = el.getAttribute('data-value') || el.getAttribute('value') || optText;
+      const trigger = findTriggerForOption(el);
+      recordStep({
+        type: 'select',
+        selector: getBestSelector(trigger),
+        xpath: getXPath(trigger),
+        value: optValue,
+        optionText: optText
+      });
+      return;
+    }
+
+    // Suppress recording clicks on Ant Design trigger internals (.ant-select-selector,
+    // .ant-select-selection-search-input, arrow icon, etc.) — these are just "open
+    // the dropdown" gestures; the real recorded action is the option click above.
+    if (el.closest('nz-select, .ant-select')) {
+      arLog('[AR:handleClick] suppressed — click inside nz-select / .ant-select trigger (not an option)');
+      return;
+    }
 
     const tag = el.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
@@ -208,7 +388,7 @@
         return;
       }
     }
-    recordStep({ type: 'click', selector: getBestSelector(el), ...elInfo(el) });
+    recordStep({ type: 'click', selector: getBestSelector(el), xpath: getXPath(el), ...elInfo(el) });
   }
 
   function handleInput(e) {
@@ -224,8 +404,19 @@
     if (!recording || replaying) return;
     const el = e.target;
     if (!(el instanceof Element)) return;
-    if (el.tagName === 'SELECT' ||
-        (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio'))) {
+    if (el.tagName === 'SELECT') {
+      // Native select — record as 'select' with both value and visible text
+      const selectedOpt = el.options[el.selectedIndex];
+      const optText = selectedOpt ? trimmed(selectedOpt.textContent) : '';
+      recordStep({
+        type: 'select',
+        selector: getBestSelector(el),
+        xpath: getXPath(el),
+        name: el.getAttribute('name') || el.getAttribute('id') || '',
+        value: String(el.value),
+        optionText: optText
+      });
+    } else if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
       recordFill(el, true);
     }
   }
@@ -237,8 +428,9 @@
     if (el === lastHoverEl) return;
     lastHoverEl = el;
     const selector = getBestSelector(el);
+    const xpath = getXPath(el);
     positionOverlay(el, selector);
-    safeSend({ type: 'HOVER_SELECTOR', selector });
+    safeSend({ type: 'HOVER_SELECTOR', selector, xpath });
   }
 
   function clearHover() {
@@ -301,7 +493,9 @@
     overlay.style.display = 'block';
 
     if (hoverLabel) {
-      hoverLabel.textContent = selector || '';
+      // Prefix XPath selectors in the label for clarity
+      const display = (selector && selector.startsWith('/')) ? `xpath: ${selector}` : (selector || '');
+      hoverLabel.textContent = display;
       const labelH = hoverLabel.offsetHeight || 20;
 
       // Prefer above the top border; fall back to inside-top if no room
@@ -369,6 +563,9 @@
   function clickElement(el) {
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     flash(el);
+    arLog('[AR:clickElement] dispatching mouse events on', {
+      tag: el.tagName, id: el.id, class: el.className, text: trimmed(el.textContent).slice(0, 60)
+    });
     for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
       el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
     }
@@ -376,13 +573,17 @@
     if (typeof el.click === 'function') el.click();
   }
 
-  function fillElement(el, step) {
+  async function fillElement(el, step) {
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     flash(el);
     el.focus();
     if (el.type === 'checkbox' || el.type === 'radio') {
       el.checked = step.value === 'true';
       el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (el.tagName === 'SELECT') {
+      // Native select — delegate to selectElement
+      await selectElement(el, step);
+      return;
     } else {
       const proto = el instanceof HTMLTextAreaElement
         ? HTMLTextAreaElement.prototype
@@ -394,6 +595,220 @@
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }
     el.blur();
+  }
+
+  // Select an option in a native <select> or trigger a custom dropdown.
+  async function selectElement(el, step) {
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    flash(el);
+
+    // --- Native <select> ---
+    if (el.tagName === 'SELECT') {
+      el.focus();
+      // Try matching by value first, then by visible text
+      let matched = false;
+      for (const opt of el.options) {
+        if (opt.value === step.value || trimmed(opt.textContent) === step.optionText) {
+          el.value = opt.value;
+          matched = true;
+          break;
+        }
+      }
+      if (matched) {
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      el.blur();
+      return;
+    }
+
+    // --- Custom dropdown (mat-select, ng-select, etc.) ---
+    // Step 1: open the dropdown by clicking the trigger
+    // For Ant Design (nz-select), use native .click() on the host — synthetic MouseEvent
+    // dispatch does NOT trigger Angular host listeners and the panel never opens.
+    const isNzSelect = el.tagName === 'NZ-SELECT' || !!el.closest('nz-select');
+    const clickTarget = getAntSelectClickTarget(el);
+
+    arLog('[AR:dropdown] Step 1 — opening trigger', {
+      resolvedEl: { tag: el.tagName, id: el.id, class: el.className },
+      clickTarget: { tag: clickTarget.tagName, id: clickTarget.id, class: clickTarget.className },
+      isNzSelect,
+      selector: step.selector,
+      optionText: step.optionText,
+      value: step.value,
+      recording,
+      replaying
+    });
+
+    if (isNzSelect) {
+      openNzSelect(clickTarget);
+    } else {
+      clickElement(clickTarget);
+    }
+    arLog('[AR:dropdown] clickElement() dispatched — waiting 400ms for panel to open');
+    await waitFor(400);
+
+    // Snapshot the DOM immediately after open to see what's there
+    const optionSelectors = [
+      'mat-option', '.ng-option', '[role="option"]',
+      '.p-dropdown-item', '.select2-results__option',
+      '.cdk-overlay-container [role="option"]',
+      // Ant Design / ng-zorro
+      '.ant-select-item-option',
+      'nz-option-item',
+      'li.ant-select-item'
+    ];
+
+    arLog('[AR:dropdown] Post-open DOM snapshot:', {
+      'mat-option count': document.querySelectorAll('mat-option').length,
+      'ng-option count': document.querySelectorAll('.ng-option').length,
+      '[role=option] count': document.querySelectorAll('[role="option"]').length,
+      'ant-select-item-option count': document.querySelectorAll('.ant-select-item-option').length,
+      'nz-option-item count': document.querySelectorAll('nz-option-item').length,
+      'li.ant-select-item count': document.querySelectorAll('li.ant-select-item').length,
+      'mat-select[aria-expanded]': document.querySelector('mat-select[aria-expanded="true"]') ? 'found OPEN' : 'NOT FOUND / closed',
+      'ng-select.ng-select-opened': document.querySelector('ng-select.ng-select-opened') ? 'found OPEN' : 'NOT FOUND / closed',
+      'nz-select.ant-select-open': document.querySelector('nz-select.ant-select-open') ? 'found OPEN' : 'NOT FOUND / closed',
+      'ant-select-dropdown visible': document.querySelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)') ? 'OPEN' : 'closed/absent',
+      'cdk-overlay-container children': document.querySelector('.cdk-overlay-container')?.children?.length ?? 'no container',
+      'overlay-backdrop': document.querySelectorAll('.cdk-overlay-backdrop').length,
+      // Raw innerHTML peek of first visible dropdown
+      'dropdown HTML (first 300)': document.querySelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')?.innerHTML?.slice(0, 300) ?? 'none'
+    });
+
+    // Step 2: find and click the matching option in the panel
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await waitFor(300);
+      let optionEl = null;
+
+      arLog(`[AR:dropdown] Attempt ${attempt + 1}/5 — scanning for option "${step.optionText}" / value "${step.value}"`);
+
+      for (const sel of optionSelectors) {
+        const candidates = Array.from(document.querySelectorAll(sel));
+        if (candidates.length > 0) {
+          arLog(`[AR:dropdown]   selector "${sel}" found ${candidates.length} candidate(s):`,
+            candidates.slice(0, 8).map(o => ({
+              text: trimmed(o.textContent),
+              value: o.getAttribute('value') || o.getAttribute('data-value'),
+              visible: o.offsetParent !== null,
+              display: getComputedStyle(o).display
+            }))
+          );
+        }
+        // Match by optionText first, then value attribute
+        optionEl = candidates.find(
+          (o) => trimmed(o.textContent) === step.optionText
+        ) || candidates.find(
+          (o) => (o.getAttribute('value') || o.getAttribute('data-value')) === step.value
+        );
+        if (optionEl) {
+          arLog(`[AR:dropdown]   MATCHED via selector "${sel}"`, {
+            text: trimmed(optionEl.textContent),
+            el: optionEl
+          });
+          break;
+        }
+      }
+
+      // Re-check if the dropdown is still open before clicking
+      const isStillOpen =
+        document.querySelectorAll('mat-option').length > 0 ||
+        document.querySelectorAll('.ng-option').length > 0 ||
+        document.querySelectorAll('[role="option"]').length > 0 ||
+        document.querySelectorAll('.ant-select-item-option').length > 0 ||
+        document.querySelectorAll('nz-option-item').length > 0 ||
+        document.querySelectorAll('li.ant-select-item').length > 0 ||
+        !!document.querySelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)');
+      arLog(`[AR:dropdown] Attempt ${attempt + 1} — dropdown still open: ${isStillOpen}, optionEl found: ${!!optionEl}`);
+
+      if (!isStillOpen && attempt === 0) {
+        arWarn('[AR:dropdown] ⚠ Dropdown closed immediately after open! Possible causes:',
+          '(1) synthetic mousedown on inner input triggered outside-click close (Ant Design),',
+          '(2) backdrop click fired during synthetic mouse events,',
+          '(3) recording=true listener re-fired.',
+          { recording, replaying, clickTargetClass: clickTarget.className }
+        );
+        // Try reopening using native click for nz-select, synthetic for others
+        const retryTarget = getAntSelectClickTarget(el);
+        arLog('[AR:dropdown] Attempting to reopen via', retryTarget.tagName, retryTarget.className);
+        if (isNzSelect) {
+          openNzSelect(retryTarget);
+        } else {
+          clickElement(retryTarget);
+        }
+        await waitFor(600);
+        arLog('[AR:dropdown] After reopen — ant-select-item-option count:',
+          document.querySelectorAll('.ant-select-item-option').length,
+          'nz-option-item count:', document.querySelectorAll('nz-option-item').length
+        );
+      }
+
+      if (optionEl) {
+        optionEl.scrollIntoView({ block: 'nearest' });
+        flash(optionEl);
+        arLog('[AR:dropdown] Clicking matched option:', trimmed(optionEl.textContent));
+        clickElement(optionEl);
+        return;
+      }
+    }
+
+    // Fallback: close the dropdown if nothing matched
+    arError('[AR:dropdown] ✖ No matching option found after 5 attempts. Escaping.', {
+      targetText: step.optionText,
+      targetValue: step.value,
+      allMatOptions: Array.from(document.querySelectorAll('mat-option')).map(o => trimmed(o.textContent)),
+      allNgOptions: Array.from(document.querySelectorAll('.ng-option')).map(o => trimmed(o.textContent)),
+      allRoleOptions: Array.from(document.querySelectorAll('[role="option"]')).map(o => trimmed(o.textContent)),
+      allAntOptions: Array.from(document.querySelectorAll('.ant-select-item-option')).map(o => trimmed(o.textContent)),
+      allNzOptions: Array.from(document.querySelectorAll('nz-option-item')).map(o => trimmed(o.textContent)),
+      allLiAntItems: Array.from(document.querySelectorAll('li.ant-select-item')).map(o => trimmed(o.textContent)),
+    });
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  }
+
+  // Resolve a step's element — try CSS selector first, then XPath fallback.
+  // If the stored selector IS an XPath (starts with / or //) use xpath eval directly.
+  function resolveElement(step) {
+    let el = null;
+    if (step.selector) {
+      if (step.selector.startsWith('/')) {
+        el = queryByXPath(step.selector);
+      } else {
+        try {
+          el = document.querySelector(step.selector);
+        } catch (e) { /* invalid CSS selector — fall through to xpath */ }
+      }
+    }
+    if (!el && step.xpath) {
+      el = queryByXPath(step.xpath);
+    }
+
+    // For 'select' steps on Ant Design: if the stored selector resolved to the inner
+    // search input (ant-select-selection-search-input), the correct click target is the
+    // nz-select container, not the input. Remap here so selectElement gets the right el.
+    // Also remap plain 'click' steps that land on the inner input — replay should click
+    // the .ant-select-selector surface, not the hidden search input.
+    if (el && (step.type === 'select' || step.type === 'click')) {
+      const remapped = getAntSelectClickTarget(el);
+      if (remapped !== el) {
+        arLog('[AR:resolveElement] remapped ant-select inner input → selector div', {
+          stepType: step.type,
+          from: { tag: el.tagName, class: el.className },
+          to: { tag: remapped.tagName, class: remapped.className },
+          note: step.type === 'click'
+            ? 'click on ant-select trigger — will be skipped in replay (no option to select)'
+            : 'select step remapped correctly'
+        });
+        // For click steps that landed on an ant-select trigger: mark with a flag so
+        // the replay loop can skip this step (opening dropdown with no option = no-op).
+        if (step.type === 'click') {
+          remapped.__antSelectTriggerOnly = true;
+        }
+        return remapped;
+      }
+    }
+
+    return el;
   }
 
   let replayCancel = false;
@@ -456,32 +871,47 @@
       await waitFor(step.delay > 0 ? Math.min(step.delay, 10000) : 500);
       if (replayCancel) break;
 
-      const el = document.querySelector(step.selector);
+      const el = resolveElement(step);
       if (!el) {
         // Retry up to 3x with 1s gap before giving up (handles slow Angular/Vue renders)
         let found = null;
         for (let r = 0; r < 3; r++) {
           await waitFor(1000);
           if (replayCancel) break;
-          found = document.querySelector(step.selector);
+          found = resolveElement(step);
           if (found) break;
         }
         if (!found) {
           safeSend({ type: 'REPLAY_EVENT', data: { level: 'warn', step: i + 1, text: `Element not found: ${step.selector}` } });
           continue;
         }
+        // Skip orphaned ant-select trigger clicks (recorded before option was chosen)
+        if (found.__antSelectTriggerOnly) {
+          arLog(`[AR:replay] step ${i + 1} skipped — ant-select trigger-only click (no option to replay)`);
+          safeSend({ type: 'REPLAY_EVENT', data: { level: 'warn', step: i + 1, text: `Skipped ant-select trigger click (step ${i + 1}) — re-record this dropdown selection` } });
+          continue;
+        }
         try {
           if (step.type === 'click') clickElement(found);
-          else if (step.type === 'fill') fillElement(found, step);
+          else if (step.type === 'fill') await fillElement(found, step);
+          else if (step.type === 'select') await selectElement(found, step);
         } catch (err) {
           safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: i + 1, text: `Step ${i + 1} failed: ${err}` } });
         }
         await waitFor(250);
         continue;
       }
+      // Skip orphaned ant-select trigger clicks (recorded before option was chosen)
+      if (el.__antSelectTriggerOnly) {
+        arLog(`[AR:replay] step ${i + 1} skipped — ant-select trigger-only click (no option to replay)`);
+        safeSend({ type: 'REPLAY_EVENT', data: { level: 'warn', step: i + 1, text: `Skipped ant-select trigger click (step ${i + 1}) — re-record this dropdown selection` } });
+        await waitFor(250);
+        continue;
+      }
       try {
         if (step.type === 'click') clickElement(el);
-        else if (step.type === 'fill') fillElement(el, step);
+        else if (step.type === 'fill') await fillElement(el, step);
+        else if (step.type === 'select') await selectElement(el, step);
       } catch (err) {
         safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: i + 1, text: `Step ${i + 1} failed: ${err}` } });
       }
@@ -509,6 +939,9 @@
       sendResponse({ ok: true });
     } else if (message.type === 'SET_REPLAY') {
       setReplay(!!message.value, message.urlPattern, message.urlIsRegex);
+      sendResponse({ ok: true });
+    } else if (message.type === 'SET_HIDE_LOG') {
+      arLogEnabled = !message.value; // value=true means hide → disable logging
       sendResponse({ ok: true });
     }
   });

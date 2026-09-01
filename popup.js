@@ -159,8 +159,8 @@
       idx.textContent = String(i + 1);
 
       const badge = document.createElement('span');
-      badge.className = 'badge ' + (step.type === 'click' ? 'b-click' : 'b-fill');
-      badge.textContent = step.type === 'click' ? 'CLICK' : 'FILL';
+      badge.className = 'badge ' + (step.type === 'click' ? 'b-click' : step.type === 'select' ? 'b-select' : 'b-fill');
+      badge.textContent = step.type === 'click' ? 'CLICK' : step.type === 'select' ? 'SELECT' : 'FILL';
 
       const body = document.createElement('div');
       body.className = 'step-body';
@@ -172,7 +172,8 @@
 
       const val = document.createElement('div');
       val.className = 'step-val';
-      if (step.type === 'fill') val.textContent = `value: ${step.value}`;
+      if (step.type === 'select') val.textContent = `option: ${step.optionText || step.value}`;
+      else if (step.type === 'fill') val.textContent = `value: ${step.value}`;
       else if (step.text) val.textContent = `text: ${step.text}`;
       else if (step.href) val.textContent = step.href;
 
@@ -219,11 +220,12 @@
       _editResolve = resolve;
 
       const isFill = step.type === 'fill';
-      const valLabel = isFill ? 'Value' : step.href ? 'Href' : 'Text';
+      const isSelect = step.type === 'select';
+      const valLabel = isFill ? 'Value' : isSelect ? 'Option Text' : step.href ? 'Href' : 'Text';
 
       $('editValLabel').textContent = valLabel;
       $('editSelector').value = step.selector || '';
-      $('editValue').value = isFill ? (step.value || '') : (step.text || step.href || '');
+      $('editValue').value = isFill ? (step.value || '') : isSelect ? (step.optionText || step.value || '') : (step.text || step.href || '');
       $('editDelay').value = step.delay != null ? String(step.delay) : '0';
 
       $('editModal').removeAttribute('hidden');
@@ -241,11 +243,13 @@
     if (!result) return; // cancelled
 
     const isFill = step.type === 'fill';
+    const isSelect = step.type === 'select';
     const patch = {
       selector: result.selector,
       delay: Math.max(0, parseInt(result.delay, 10) || 0)
     };
     if (isFill) patch.value = result.value;
+    else if (isSelect) { patch.optionText = result.value; patch.value = result.value; }
     else if (step.href) patch.href = result.value;
     else patch.text = result.value;
 
@@ -508,6 +512,19 @@
     $('deleteSuiteBtn').addEventListener('click', deleteSuite);
     $('importSuiteBtn').addEventListener('click', () => $('importSuiteFile').click());
     $('importSuiteFile').addEventListener('change', importSuite);
+
+    // Debug log toggle — persisted in storage, default: hidden (checked)
+    const hideLogChk = $('hideLogChk');
+    const { arHideLog } = await chrome.storage.local.get('arHideLog');
+    hideLogChk.checked = arHideLog !== false; // default true
+    hideLogChk.addEventListener('change', async () => {
+      await chrome.storage.local.set({ arHideLog: hideLogChk.checked });
+      // Notify the active tab's content script immediately
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab && tab.id != null) {
+        chrome.tabs.sendMessage(tab.id, { type: 'SET_HIDE_LOG', value: hideLogChk.checked }).catch(() => {});
+      }
+    });
 
     await refresh();
   });
