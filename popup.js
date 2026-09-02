@@ -168,17 +168,19 @@
   }
 
   function renderSuiteBar() {
-    const dropdown = $('suiteDropdown');
-    // Rebuild options grouped by the prefix before the first '/'
-    // e.g. ['suite1', 'a/test1', 'a/test2', 'b/x'] →
-    //   (root)  suite1
-    //   a/      test1, test2
-    //   b/      x
-    dropdown.innerHTML = '';
+    const trigger = $('suiteDropdown');
+    const panel   = $('suiteDropdownPanel');
 
-    // Partition into root (no slash) and groups (has slash)
+    // Update trigger label
+    $('suiteDropdownLabel').textContent = activeSuite.includes('/')
+      ? activeSuite.slice(activeSuite.lastIndexOf('/') + 1)
+      : activeSuite;
+
+    // Rebuild panel items grouped by prefix
+    panel.innerHTML = '';
+
     const rootSuites = suites.filter((s) => !s.includes('/'));
-    const grouped = {};   // { groupPrefix: [fullName, ...] }
+    const grouped = {};
     for (const s of suites) {
       if (!s.includes('/')) continue;
       const slash = s.indexOf('/');
@@ -187,36 +189,61 @@
       grouped[prefix].push(s);
     }
 
-    // Root suites — no optgroup wrapper
-    for (const s of rootSuites) {
-      const opt = document.createElement('option');
-      opt.value = s;
-      opt.textContent = s;
-      if (s === activeSuite) opt.selected = true;
-      dropdown.appendChild(opt);
-    }
+    const addItem = (fullName, label) => {
+      const item = document.createElement('div');
+      item.className = 'suite-panel__item' + (fullName === activeSuite ? ' active' : '');
+      item.setAttribute('role', 'option');
+      item.setAttribute('data-value', fullName);
+      item.textContent = label;
+      item.addEventListener('click', () => {
+        closeDropdown();
+        if (fullName !== activeSuite) switchSuite(fullName);
+      });
+      panel.appendChild(item);
+    };
 
-    // Grouped suites — one <optgroup> per prefix, label is "prefix/"
+    for (const s of rootSuites) addItem(s, s);
+
     for (const prefix of Object.keys(grouped).sort()) {
-      const group = document.createElement('optgroup');
-      group.label = prefix + '/';
-      for (const s of grouped[prefix]) {
-        const opt = document.createElement('option');
-        opt.value = s;
-        // Show only the short name after the slash inside the group
-        opt.textContent = s.slice(prefix.length + 1);
-        if (s === activeSuite) opt.selected = true;
-        group.appendChild(opt);
-      }
-      dropdown.appendChild(group);
+      const groupEl = document.createElement('div');
+      groupEl.className = 'suite-panel__group';
+      groupEl.textContent = prefix + '/';
+      panel.appendChild(groupEl);
+      for (const s of grouped[prefix]) addItem(s, s.slice(prefix.length + 1));
     }
 
-    // Disable suite controls while recording
-    dropdown.disabled = recordingState.active;
-    $('newSuiteBtn').disabled = recordingState.active;
-    $('editSuiteBtn').disabled = recordingState.active;
-    $('deleteSuiteBtn').disabled = recordingState.active || suites.length <= 1;
-    $('importSuiteBtn').disabled = recordingState.active;
+    // Disable controls while recording
+    const dis = recordingState.active;
+    trigger.classList.toggle('disabled', dis);
+    $('newSuiteBtn').disabled = dis;
+    $('editSuiteBtn').disabled = dis;
+    $('deleteSuiteBtn').disabled = dis || suites.length <= 1;
+    $('importSuiteBtn').disabled = dis;
+  }
+
+  // ------------------------------------------------------------- custom dropdown open/close
+  function openDropdown() {
+    const trigger = $('suiteDropdown');
+    const panel   = $('suiteDropdownPanel');
+    if (trigger.classList.contains('disabled')) return;
+
+    // Position panel below the trigger
+    const rect = trigger.getBoundingClientRect();
+    panel.style.top  = (rect.bottom + 4) + 'px';
+    panel.style.left = rect.left + 'px';
+    panel.style.width = Math.max(rect.width, 160) + 'px';
+
+    panel.removeAttribute('hidden');
+    trigger.setAttribute('aria-expanded', 'true');
+
+    // Scroll active item into view
+    const active = panel.querySelector('.suite-panel__item.active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+  }
+
+  function closeDropdown() {
+    $('suiteDropdownPanel').setAttribute('hidden', '');
+    $('suiteDropdown').setAttribute('aria-expanded', 'false');
   }
 
   function renderList(steps) {
@@ -264,6 +291,12 @@
       const actions = document.createElement('div');
       actions.className = 'step-actions';
 
+      const runBtn = document.createElement('button');
+      runBtn.className = 'step-btn step-btn--run';
+      runBtn.title = 'Run this step';
+      runBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><path d="M8 5v14l11-7z"/></svg>';
+      runBtn.addEventListener('click', () => runStep(i));
+
       const editBtn = document.createElement('button');
       editBtn.className = 'step-btn step-btn--edit';
       editBtn.title = 'Edit step';
@@ -276,8 +309,13 @@
       delBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><path d="M7 21C6.45 21 5.979 20.804 5.587 20.412C5.195 20.02 5 19.55 5 19V6H4V4H9V3H15V4H20V6H19V19C19 19.55 18.804 20.021 18.412 20.413C18.02 20.805 17.55 21 17 21H7Z"/></svg>';
       delBtn.addEventListener('click', () => deleteStep(i));
 
-      actions.append(editBtn, delBtn);
-      row.append(idx, badge, body, actions);
+      actions.append(runBtn, editBtn, delBtn);
+
+      const top = document.createElement('div');
+      top.className = 'step-top';
+      top.append(idx, badge, body);
+
+      row.append(top, actions);
       list.appendChild(row);
     });
   }
@@ -290,6 +328,19 @@
     } else {
       showStatus(res.error || 'Failed to delete step.', true);
     }
+  }
+
+  async function runStep(index) {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || tab.id == null) { showStatus('No active tab found.', true); return; }
+    if (!/^https?:/.test(tab.url || '')) { showStatus('Cannot run on this page type.', true); return; }
+    const step = currentSession && currentSession.steps && currentSession.steps[index];
+    if (!step) return;
+    isReplaying = true;
+    setReplayProgress(0, 1, step.selector);
+    showStatus(`Running step ${index + 1}…`);
+    render();
+    await sendMsg('RUN_STEP', { tabId: tab.id, suiteName: activeSuite, stepIndex: index });
   }
 
   // ------------------------------------------------------------- inline edit modal
@@ -316,6 +367,53 @@
   function closeEditModal(result) {
     $('editModal').setAttribute('hidden', '');
     if (_editResolve) { _editResolve(result); _editResolve = null; }
+  }
+
+  // ------------------------------------------------------------- name-input modal (new / rename / import)
+  let _nameResolve = null;
+
+  function openNameModal({ title, label = 'Suite name', description = '', defaultValue = '', placeholder = '' }) {
+    return new Promise((resolve) => {
+      _nameResolve = resolve;
+      $('nameModalTitle').textContent = title;
+      $('nameModalLabel').textContent = label;
+      $('nameModalInput').value = defaultValue;
+      $('nameModalInput').placeholder = placeholder || '';
+      const desc = $('nameModalDesc');
+      if (description) {
+        desc.textContent = description;
+        desc.removeAttribute('hidden');
+      } else {
+        desc.setAttribute('hidden', '');
+      }
+      $('nameModal').removeAttribute('hidden');
+      $('nameModalInput').focus();
+      $('nameModalInput').select();
+    });
+  }
+
+  function closeNameModal(result) {
+    $('nameModal').setAttribute('hidden', '');
+    if (_nameResolve) { _nameResolve(result); _nameResolve = null; }
+  }
+
+  // ------------------------------------------------------------- confirm modal (delete)
+  let _confirmResolve = null;
+
+  function openConfirmModal({ title, description, okLabel = 'Delete' }) {
+    return new Promise((resolve) => {
+      _confirmResolve = resolve;
+      $('confirmModalTitle').textContent = title;
+      $('confirmModalDesc').textContent = description;
+      $('confirmModalOkBtn').textContent = okLabel;
+      $('confirmModal').removeAttribute('hidden');
+      $('confirmModalOkBtn').focus();
+    });
+  }
+
+  function closeConfirmModal(result) {
+    $('confirmModal').setAttribute('hidden', '');
+    if (_confirmResolve) { _confirmResolve(result); _confirmResolve = null; }
   }
 
   async function editStep(index, step) {
@@ -375,7 +473,7 @@
   }
 
   async function addSuite() {
-    const name = prompt('Name for the new suite:');
+    const name = await openNameModal({ title: 'New Suite', label: 'Suite name', placeholder: 'e.g. login-flow' });
     if (!name || !name.trim()) return;
     const res = await sendMsg('ADD_SUITE', { suiteName: name.trim() });
     if (res.ok) {
@@ -389,7 +487,7 @@
   }
 
   async function editSuite() {
-    const newName = prompt('Rename suite to:', activeSuite);
+    const newName = await openNameModal({ title: 'Rename Suite', label: 'New name', defaultValue: activeSuite });
     if (!newName || !newName.trim() || newName.trim() === activeSuite) return;
     const res = await sendMsg('RENAME_SUITE', { oldName: activeSuite, newName: newName.trim() });
     if (res.ok) {
@@ -407,7 +505,12 @@
       showStatus('Cannot delete the last suite.', true);
       return;
     }
-    if (!confirm(`Delete suite "${activeSuite}" and all its recorded steps?`)) return;
+    const confirmed = await openConfirmModal({
+      title: 'Delete Suite',
+      description: `Delete suite "${activeSuite}" and all its recorded steps? This cannot be undone.`,
+      okLabel: 'Delete'
+    });
+    if (!confirmed) return;
     const res = await sendMsg('DELETE_SUITE', { suiteName: activeSuite });
     if (res.ok) {
       suites = res.suites;
@@ -516,12 +619,14 @@
     // If a suite with that name already exists, ask whether to overwrite or pick a new name.
     let targetName = defaultName;
     if (suites.includes(targetName)) {
-      const choice = prompt(
-        `Suite "${targetName}" already exists.\nEnter a new name to keep both, or leave as-is to overwrite:`,
-        targetName
-      );
+      const choice = await openNameModal({
+        title: 'Suite Already Exists',
+        description: `Suite "${targetName}" already exists. Enter a new name to keep both, or leave as-is to overwrite.`,
+        label: 'Suite name',
+        defaultValue: targetName
+      });
       if (choice === null) return; // cancelled
-      targetName = choice.trim() || targetName;
+      targetName = (choice || '').trim() || targetName;
     }
 
     const res = await sendMsg('IMPORT_SUITE', { session: parsed, suiteName: targetName });
@@ -539,9 +644,19 @@
   async function clearCurrent() {
     const hasSteps = currentSession && currentSession.steps && currentSession.steps.length;
     if (recordingState.active) {
-      if (!confirm(`Stop recording and clear all steps in "${activeSuite}"?`)) return;
+      const confirmed = await openConfirmModal({
+        title: 'Stop & Clear',
+        description: `Stop recording and clear all steps in "${activeSuite}"?`,
+        okLabel: 'Clear'
+      });
+      if (!confirmed) return;
     } else if (hasSteps) {
-      if (!confirm(`Clear all recorded steps in "${activeSuite}"?`)) return;
+      const confirmed = await openConfirmModal({
+        title: 'Clear Steps',
+        description: `Clear all recorded steps in "${activeSuite}"? This cannot be undone.`,
+        okLabel: 'Clear'
+      });
+      if (!confirmed) return;
     }
     const res = await sendMsg('CLEAR_SESSION', { suiteName: activeSuite });
     showStatus(res.ok ? `"${activeSuite}" cleared.` : 'Failed to clear.', !res.ok);
@@ -585,8 +700,47 @@
       });
     });
 
+    // Name modal
+    $('nameModalOkBtn').addEventListener('click', () => closeNameModal($('nameModalInput').value));
+    $('nameModalCancelBtn').addEventListener('click', () => closeNameModal(null));
+    $('nameModal').addEventListener('click', (e) => {
+      if (e.target === $('nameModal')) closeNameModal(null);
+    });
+    $('nameModalInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') closeNameModal($('nameModalInput').value);
+      if (e.key === 'Escape') closeNameModal(null);
+    });
+
+    // Confirm modal
+    $('confirmModalOkBtn').addEventListener('click', () => closeConfirmModal(true));
+    $('confirmModalCancelBtn').addEventListener('click', () => closeConfirmModal(false));
+    $('confirmModal').addEventListener('click', (e) => {
+      if (e.target === $('confirmModal')) closeConfirmModal(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        if (!$('editModal').hidden) closeEditModal(null);
+        if (!$('nameModal').hidden) closeNameModal(null);
+        if (!$('confirmModal').hidden) closeConfirmModal(false);
+      }
+    });
+
     // Suite bar
-    $('suiteDropdown').addEventListener('change', (e) => switchSuite(e.target.value));
+    $('suiteDropdown').addEventListener('click', (e) => {
+      if ($('suiteDropdown').classList.contains('disabled')) return;
+      if ($('suiteDropdownPanel').hidden) openDropdown();
+      else closeDropdown();
+    });
+    $('suiteDropdown').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDropdown(); }
+      if (e.key === 'Escape') closeDropdown();
+    });
+    // Close when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!$('suiteDropdown').contains(e.target) && !$('suiteDropdownPanel').contains(e.target)) {
+        closeDropdown();
+      }
+    });
     $('newSuiteBtn').addEventListener('click', addSuite);
     $('editSuiteBtn').addEventListener('click', editSuite);
     $('deleteSuiteBtn').addEventListener('click', deleteSuite);

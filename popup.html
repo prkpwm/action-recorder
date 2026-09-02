@@ -20,8 +20,12 @@
 
         <!-- Suite selector bar -->
         <div class="suite-bar">
-            <label class="suite-label" for="suiteDropdown">Suite:</label>
-            <select id="suiteDropdown" class="suite-select"></select>
+            <label class="suite-label">Suite:</label>
+            <div id="suiteDropdown" class="suite-select" tabindex="0" role="combobox" aria-haspopup="listbox" aria-expanded="false">
+                <span id="suiteDropdownLabel" class="suite-select__label"></span>
+                <svg class="suite-select__arrow" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><path d="M7 10l5 5 5-5z"/></svg>
+            </div>
+            <div id="suiteDropdownPanel" class="suite-panel" role="listbox" hidden></div>
             <button id="newSuiteBtn" class="suite-btn" title="New suite">
                 <!-- plus icon -->
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
@@ -115,6 +119,32 @@
             <div class="modal-row">
                 <button id="editCancelBtn" class="btn">Cancel</button>
                 <button id="editSaveBtn" class="btn primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Name-input modal (New suite / Rename suite / Import conflict) -->
+    <div id="nameModal" class="modal" hidden>
+        <div class="modal-box">
+            <div id="nameModalTitle" class="modal-title">New Suite</div>
+            <p id="nameModalDesc" class="modal-desc" hidden></p>
+            <label id="nameModalLabel" class="modal-label">Suite name</label>
+            <input id="nameModalInput" class="modal-input" type="text" spellcheck="false" placeholder="e.g. login-flow">
+            <div class="modal-row">
+                <button id="nameModalCancelBtn" class="btn">Cancel</button>
+                <button id="nameModalOkBtn" class="btn primary">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm modal (Delete suite) -->
+    <div id="confirmModal" class="modal" hidden>
+        <div class="modal-box">
+            <div id="confirmModalTitle" class="modal-title">Delete Suite</div>
+            <p id="confirmModalDesc" class="modal-desc"></p>
+            <div class="modal-row">
+                <button id="confirmModalCancelBtn" class="btn">Cancel</button>
+                <button id="confirmModalOkBtn" class="btn danger-solid">Delete</button>
             </div>
         </div>
     </div>

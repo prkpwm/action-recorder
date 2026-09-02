@@ -106,6 +106,15 @@ async function stopReplay() {
   return { ok: true };
 }
 
+async function runSingleStep(tabId, suiteName, stepIndex) {
+  const msg = { type: 'RUN_STEP', suiteName, stepIndex };
+  if (!await sendToTab(tabId, msg)) {
+    await ensureContentScript(tabId);
+    await sendToTab(tabId, msg);
+  }
+  return { ok: true };
+}
+
 // ------------------------------------------------------------- suite management
 
 async function addSuite(suiteName) {
@@ -289,6 +298,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       case 'STOP_REPLAY':
         sendResponse(await stopReplay());
+        break;
+      case 'RUN_STEP':
+        sendResponse(await runSingleStep(message.tabId, message.suiteName, message.stepIndex));
         break;
 
       case 'ADD_SUITE':

@@ -1069,6 +1069,59 @@
     }
   }
 
+  // ------------------------------------------------------------- single-step replay
+  async function runSingleStep(suiteName, stepIndex) {
+    if (!ctxOk()) return;
+    const key = suiteKey(suiteName);
+    const stored = await storageGet(key);
+    const session = stored[key];
+    if (!session || !Array.isArray(session.steps)) return;
+    const step = session.steps[stepIndex];
+    if (!step) return;
+
+    replaying = true;
+    replayCancel = false;
+
+    safeSend({ type: 'REPLAY_STARTED' });
+    safeSend({ type: 'REPLAY_STEP', data: { current: 1, total: 1, selector: step.selector, stepType: step.type } });
+
+    // Resolve with up to 3 retries (element may not be in DOM yet)
+    let el = resolveElement(step);
+    if (!el) {
+      for (let r = 0; r < 3; r++) {
+        await waitFor(1000);
+        el = resolveElement(step);
+        if (el) break;
+      }
+    }
+
+    if (!el) {
+      safeSend({ type: 'REPLAY_EVENT', data: { level: 'warn', step: stepIndex + 1, text: `Element not found: ${step.selector}` } });
+    } else if (el.__antSelectTriggerOnly) {
+      safeSend({ type: 'REPLAY_EVENT', data: { level: 'warn', step: stepIndex + 1, text: `Skipped ant-select trigger-only click — re-record this dropdown selection` } });
+    } else {
+      try {
+        if (step.type === 'click') {
+          if (isLayoutContainer(el)) {
+            dispatchHoverChain(el);
+            await waitFor(400);
+          } else {
+            clickElement(el);
+          }
+        } else if (step.type === 'fill') {
+          await fillElement(el, step);
+        } else if (step.type === 'select') {
+          await selectElement(el, step);
+        }
+      } catch (err) {
+        safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: stepIndex + 1, text: `Step ${stepIndex + 1} failed: ${err}` } });
+      }
+    }
+
+    replaying = false;
+    safeSend({ type: 'REPLAY_FINISHED' });
+  }
+
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!ctxOk()) return;
     if (message.type === 'SET_RECORDING') {
@@ -1079,6 +1132,9 @@
       sendResponse({ ok: true });
     } else if (message.type === 'SET_HIDE_LOG') {
       arLogEnabled = !message.value; // value=true means hide → disable logging
+      sendResponse({ ok: true });
+    } else if (message.type === 'RUN_STEP') {
+      runSingleStep(message.suiteName, message.stepIndex);
       sendResponse({ ok: true });
     }
   });

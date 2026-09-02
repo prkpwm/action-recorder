@@ -215,14 +215,20 @@ h3 {
 
 .step {
     display: flex;
-    align-items: flex-start;
-    gap: 8px;
+    flex-direction: column;
     padding: 8px 10px;
     border-bottom: 1px solid #f3f4f6;
+    gap: 0;
 }
 
 .step:last-child {
     border-bottom: none;
+}
+
+.step-top {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
 }
 
 .step .idx {
@@ -326,6 +332,11 @@ h3 {
 .suite-select {
     flex: 1;
     min-width: 0;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
     font-family: var(--font);
     font-size: 12px;
     font-weight: 600;
@@ -333,33 +344,114 @@ h3 {
     background: #f3f4f6;
     border: 1px solid var(--border);
     border-radius: 6px;
-    padding: 4px 6px;
+    padding: 4px 8px;
     cursor: pointer;
     outline: none;
+    user-select: none;
+    transition: border-color 0.15s, background 0.15s;
 }
 
-.suite-select optgroup {
-    font-style: normal;
-    font-weight: 700;
-    color: var(--subtle);
-    font-size: 11px;
+.suite-select:hover {
+    border-color: #d1d5db;
+    background: #eaecf0;
 }
 
-.suite-select optgroup option {
-    font-weight: 600;
-    color: var(--text);
-    font-size: 12px;
-    padding-left: 4px;
-}
-
-.suite-select:focus {
+.suite-select:focus,
+.suite-select[aria-expanded="true"] {
     border-color: var(--primary);
     background: #eff6ff;
 }
 
-.suite-select:disabled {
+.suite-select.disabled {
     opacity: 0.5;
     cursor: not-allowed;
+    pointer-events: none;
+}
+
+.suite-select__label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.suite-select__arrow {
+    flex-shrink: 0;
+    color: var(--subtle);
+    transition: transform 0.15s;
+}
+
+.suite-select[aria-expanded="true"] .suite-select__arrow {
+    transform: rotate(180deg);
+}
+
+/* ---- Custom dropdown panel ---- */
+.suite-panel {
+    position: fixed;
+    z-index: 9998;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.14);
+    padding: 4px;
+    min-width: 160px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.suite-panel[hidden] {
+    display: none;
+}
+
+.suite-panel__group {
+    padding: 4px 8px 2px;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.suite-panel__item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+    white-space: nowrap;
+}
+
+.suite-panel__item:hover {
+    background: #f3f4f6;
+}
+
+.suite-panel__item.active {
+    background: #eff6ff;
+    color: var(--primary);
+}
+
+.suite-panel__item.active::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--primary);
+    flex-shrink: 0;
+}
+
+.suite-panel__item:not(.active)::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    flex-shrink: 0;
 }
 
 .suite-btn {
@@ -398,15 +490,20 @@ h3 {
 /* ---- Per-step action buttons ---- */
 .step-actions {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     gap: 4px;
-    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    margin-top: 6px;
     opacity: 0;
-    transition: opacity 0.15s;
+    max-height: 0;
+    overflow: hidden;
+    transition: opacity 0.15s, max-height 0.15s;
 }
 
 .step:hover .step-actions {
     opacity: 1;
+    max-height: 32px;
 }
 
 .step-btn {
@@ -427,6 +524,12 @@ h3 {
 .step-btn--edit:hover {
     background: var(--primary);
     border-color: var(--primary);
+    color: #fff;
+}
+
+.step-btn--run:hover {
+    background: var(--accent);
+    border-color: var(--accent);
     color: #fff;
 }
 
@@ -501,6 +604,24 @@ h3 {
     display: flex;
     gap: 8px;
     margin-top: 4px;
+}
+
+.modal-desc {
+    margin: 0;
+    font-size: 12px;
+    color: var(--subtle);
+    line-height: 1.5;
+}
+
+.btn.danger-solid {
+    background: var(--danger);
+    color: #fff;
+    border-color: var(--danger);
+}
+
+.btn.danger-solid:hover:not(:disabled) {
+    background: var(--danger-hover);
+    border-color: var(--danger-hover);
 }
 
 /* ---- Replay progress bar ---- */
