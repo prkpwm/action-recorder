@@ -623,7 +623,13 @@
     el.focus();
     if (el.type === 'checkbox' || el.type === 'radio') {
       el.checked = step.value === 'true';
+      el.dispatchEvent(new Event('input',  { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
+      await waitFor(50);
+      el.dispatchEvent(new FocusEvent('focusout', { bubbles: true, cancelable: true, relatedTarget: null }));
+      el.dispatchEvent(new FocusEvent('blur',      { bubbles: false, cancelable: false, relatedTarget: null }));
+      el.blur();
+      return;
     } else if (el.tagName === 'SELECT') {
       // Native select — delegate to selectElement
       await selectElement(el, step);
@@ -635,9 +641,19 @@
       const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
       if (setter) setter.call(el, step.value || '');
       else el.value = step.value || '';
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('input',  { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }
+    // Give the framework (Angular/React/Vue) a tick to process the value change,
+    // then fire focusout (bubbles — needed for Angular reactive form touched state)
+    // before the native blur so validators and UI state update correctly.
+    await waitFor(50);
+    // Angular ControlValueAccessor listens to 'input' and 'change'  ✓ (already fired above)
+    // Angular reactive forms mark 'touched' on 'focusout' (bubbles)
+    // React SyntheticEvent listens to 'change' (bubbles) + 'blur' (non-bubbling via capture)
+    // Vue uses 'input'/'change' + native blur
+    el.dispatchEvent(new FocusEvent('focusout', { bubbles: true,  cancelable: true,  relatedTarget: null }));
+    el.dispatchEvent(new FocusEvent('blur',      { bubbles: false, cancelable: false, relatedTarget: null }));
     el.blur();
   }
 
@@ -660,9 +676,13 @@
       }
       if (matched) {
         el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
       }
+      await waitFor(50);
+      el.dispatchEvent(new FocusEvent('focusout', { bubbles: true,  cancelable: true,  relatedTarget: null }));
+      el.dispatchEvent(new FocusEvent('blur',      { bubbles: false, cancelable: false, relatedTarget: null }));
       el.blur();
+    
       return;
     }
 
