@@ -131,6 +131,30 @@
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
     const tag = el.tagName.toLowerCase();
 
+    // For nz-select: NEVER use class-based selectors — ng-zorro adds/removes state
+    // classes (ant-select-open, ant-select-focused, etc.) dynamically.
+    // Use stable attributes first; fall back to :has(#inner-input-id) or nth-of-type.
+    if (tag === 'nz-select') {
+      const name = el.getAttribute('name');
+      if (name) return `nz-select[name="${attr(name)}"]`;
+      const id = el.getAttribute('id');
+      if (id) return `nz-select#${esc(id)}`;
+      const testid = el.getAttribute('data-testid') || el.getAttribute('data-qa');
+      if (testid) return `nz-select[data-testid="${attr(testid)}"]`;
+      // Use the inner search input's id as a proxy — produces a stable :has() selector
+      const innerInput = el.querySelector('input[id]');
+      if (innerInput && innerInput.id) {
+        const hasSel = `nz-select:has(#${esc(innerInput.id)})`;
+        try {
+          if (document.querySelectorAll(hasSel).length === 1) return hasSel;
+        } catch (e) { /* :has() not supported */ }
+      }
+      // Fallback: positional index among all nz-select on the page
+      const allNz = Array.from(document.querySelectorAll('nz-select'));
+      const idx = allNz.indexOf(el);
+      return idx >= 0 ? `nz-select:nth-of-type(${idx + 1})` : getCssPath(el);
+    }
+
     const name = el.getAttribute('name');
     if (name) {
       const s = `${tag}[name="${attr(name)}"]`;
@@ -220,12 +244,29 @@
       'mat-option, mat-select-panel, ng-dropdown-panel, .ng-option, ' +
       '[role="option"], [role="listbox"] li, .p-dropdown-items li, .select2-results__option, ' +
       '.cdk-overlay-container mat-option, ' +
-      '.ant-select-item-option, nz-option-item, .ant-select-dropdown nz-option-item-group'
+      '.ant-select-item-option, .ant-select-item-option-content, nz-option-item, .ant-select-dropdown nz-option-item-group'
     ));
   }
 
   // Given an option element, find the triggering select element (best effort)
   function findTriggerForOption(optionEl) {
+    // Ant Design (nz-select / ant-select) — check FIRST because the panel is a portal
+    // overlay that has no ancestor relationship to the trigger. Identify the open
+    // nz-select by its ant-select-open class (added by ng-zorro when the panel is open).
+    const nzSelectOpen = document.querySelector('nz-select.ant-select-open')
+      || document.querySelector('nz-select[nzopen]')
+      || document.querySelector('.ant-select.ant-select-open nz-select');
+    if (nzSelectOpen) return nzSelectOpen;
+
+    // Check for any nz-select whose inner search input id matches a data attribute on
+    // the option panel (best-effort correlation when multiple nz-selects exist).
+    const allNzSelects = Array.from(document.querySelectorAll('nz-select'));
+    if (allNzSelects.length === 1) return allNzSelects[0];
+    // Pick the one whose aria-expanded is true, or the one with ant-select-focused
+    const focused = allNzSelects.find(s => s.classList.contains('ant-select-focused'))
+      || allNzSelects.find(s => s.querySelector('.ant-select-selection-search-input:focus'));
+    if (focused) return focused;
+
     // Angular Material — panel is in overlay; find the open mat-select
     const matSelect = document.querySelector('mat-select[aria-expanded="true"]')
       || document.querySelector('mat-select.mat-select-invalid')
@@ -237,37 +278,39 @@
       || document.querySelector('ng-select');
     if (ngSelect) return ngSelect;
 
-    // Ant Design (nz-select / ant-select) — panel is in a portal overlay
-    // Find the open nz-select by its aria-expanded state or open class
-    const nzSelect = document.querySelector('nz-select.ant-select-open')
-      || document.querySelector('nz-select[nzopen]')
-      || document.querySelector('.ant-select.ant-select-open nz-select')
-      || document.querySelector('nz-select');
-    if (nzSelect) return nzSelect;
-
     // Generic: look for an ancestor trigger
     return getDropdownTrigger(optionEl) || optionEl;
   }
 
-  // For Ant Design: return the nz-select HOST element (Angular host listener lives there).
-  // Never return an inner child — synthetic mousedown on children bypasses ng-zorro's handler.
+  // For Ant Design: return the nz-select-top-control (.ant-select-selector) surface.
+  // ng-zorro attaches its (click) host listener to nz-select-top-control, NOT the
+  // nz-select host — clicking the host element alone does NOT open the dropdown panel.
   function getAntSelectClickTarget(el) {
-    // Walk up from any inner element (search input, selector div, arrow, etc.)
-    const nzSelect = el.closest('nz-select');
-    if (nzSelect) return nzSelect;
-
-    // Already the host or a plain .ant-select wrapper
-    if (el.tagName === 'NZ-SELECT' || el.classList.contains('ant-select')) return el;
-
+    // Walk up to the nz-select host first
+    const nzSelect = el.closest('nz-select') ||
+      (el.tagName === 'NZ-SELECT' ? el : null);
+    if (nzSelect) {
+      // Prefer the selector surface — ng-zorro's click handler lives here
+      const surface = nzSelect.querySelector('nz-select-top-control, .ant-select-selector');
+      if (surface) return surface;
+      return nzSelect;
+    }
+    // Plain .ant-select wrapper without nz-select tag
+    if (el.classList.contains('ant-select')) {
+      const surface = el.querySelector('nz-select-top-control, .ant-select-selector');
+      if (surface) return surface;
+      return el;
+    }
     return el;
   }
 
-  // Open an ng-zorro nz-select dropdown using the native .click() on the host.
-  // Synthetic MouseEvent dispatch does NOT trigger Angular host listeners on nz-select.
-  function openNzSelect(nzSelectEl) {
-    arLog('[AR:openNzSelect] calling native .click() on', nzSelectEl.tagName, nzSelectEl.getAttribute('name') || nzSelectEl.id);
-    // Native .click() triggers Angular's (click) host binding
-    nzSelectEl.click();
+  // Open an ng-zorro nz-select dropdown by clicking nz-select-top-control (the selector
+  // surface). ng-zorro's (click) host listener lives on nz-select-top-control in recent
+  // versions — clicking the nz-select host alone does NOT open the panel.
+  // Pass the already-resolved surface element directly; do NOT re-wrap via getAntSelectClickTarget.
+  function openNzSelect(surfaceEl) {
+    arLog('[AR:openNzSelect] clicking surface:', surfaceEl.tagName, surfaceEl.className);
+    surfaceEl.click();
   }
 
   // ------------------------------------------------------------- recording
@@ -688,56 +731,41 @@
 
     // --- Custom dropdown (mat-select, ng-select, etc.) ---
     // Step 1: open the dropdown by clicking the trigger
-    // For Ant Design (nz-select), use native .click() on the host — synthetic MouseEvent
-    // dispatch does NOT trigger Angular host listeners and the panel never opens.
     const isNzSelect = el.tagName === 'NZ-SELECT' || !!el.closest('nz-select');
+    // getAntSelectClickTarget returns nz-select-top-control for nz-select elements
+    // (the surface where ng-zorro's click handler actually lives).
     const clickTarget = getAntSelectClickTarget(el);
 
     arLog('[AR:dropdown] Step 1 — opening trigger', {
-      resolvedEl: { tag: el.tagName, id: el.id, class: el.className },
-      clickTarget: { tag: clickTarget.tagName, id: clickTarget.id, class: clickTarget.className },
-      isNzSelect,
-      selector: step.selector,
-      optionText: step.optionText,
-      value: step.value,
-      recording,
-      replaying
+      elTag: el.tagName, elId: el.id,
+      clickTargetTag: clickTarget.tagName, clickTargetClass: clickTarget.className,
+      isNzSelect, optionText: step.optionText, value: step.value
     });
 
     if (isNzSelect) {
-      openNzSelect(clickTarget);
+      openNzSelect(clickTarget);   // clickTarget is already the surface; openNzSelect just .click()s it
     } else {
       clickElement(clickTarget);
     }
-    arLog('[AR:dropdown] clickElement() dispatched — waiting 400ms for panel to open');
-    await waitFor(400);
+    arLog('[AR:dropdown] clickElement() dispatched — waiting 600ms for panel to open');
+    await waitFor(600);
 
     // Snapshot the DOM immediately after open to see what's there
     const optionSelectors = [
       'mat-option', '.ng-option', '[role="option"]',
       '.p-dropdown-item', '.select2-results__option',
       '.cdk-overlay-container [role="option"]',
-      // Ant Design / ng-zorro
       '.ant-select-item-option',
       'nz-option-item',
       'li.ant-select-item'
     ];
 
     arLog('[AR:dropdown] Post-open DOM snapshot:', {
-      'mat-option count': document.querySelectorAll('mat-option').length,
-      'ng-option count': document.querySelectorAll('.ng-option').length,
-      '[role=option] count': document.querySelectorAll('[role="option"]').length,
-      'ant-select-item-option count': document.querySelectorAll('.ant-select-item-option').length,
-      'nz-option-item count': document.querySelectorAll('nz-option-item').length,
-      'li.ant-select-item count': document.querySelectorAll('li.ant-select-item').length,
-      'mat-select[aria-expanded]': document.querySelector('mat-select[aria-expanded="true"]') ? 'found OPEN' : 'NOT FOUND / closed',
-      'ng-select.ng-select-opened': document.querySelector('ng-select.ng-select-opened') ? 'found OPEN' : 'NOT FOUND / closed',
-      'nz-select.ant-select-open': document.querySelector('nz-select.ant-select-open') ? 'found OPEN' : 'NOT FOUND / closed',
-      'ant-select-dropdown visible': document.querySelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)') ? 'OPEN' : 'closed/absent',
-      'cdk-overlay-container children': document.querySelector('.cdk-overlay-container')?.children?.length ?? 'no container',
-      'overlay-backdrop': document.querySelectorAll('.cdk-overlay-backdrop').length,
-      // Raw innerHTML peek of first visible dropdown
-      'dropdown HTML (first 300)': document.querySelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)')?.innerHTML?.slice(0, 300) ?? 'none'
+      nzOptionItem: document.querySelectorAll('nz-option-item').length,
+      antSelectItemOption: document.querySelectorAll('.ant-select-item-option').length,
+      roleOption: document.querySelectorAll('[role="option"]').length,
+      antDropdownVisible: !!document.querySelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)'),
+      nzSelectOpen: !!document.querySelector('nz-select.ant-select-open'),
     });
 
     // Step 2: find and click the matching option in the panel
@@ -749,16 +777,6 @@
 
       for (const sel of optionSelectors) {
         const candidates = Array.from(document.querySelectorAll(sel));
-        if (candidates.length > 0) {
-          arLog(`[AR:dropdown]   selector "${sel}" found ${candidates.length} candidate(s):`,
-            candidates.slice(0, 8).map(o => ({
-              text: trimmed(o.textContent),
-              value: o.getAttribute('value') || o.getAttribute('data-value'),
-              visible: o.offsetParent !== null,
-              display: getComputedStyle(o).display
-            }))
-          );
-        }
         // Match by optionText first, then value attribute
         optionEl = candidates.find(
           (o) => trimmed(o.textContent) === step.optionText
@@ -766,11 +784,12 @@
           (o) => (o.getAttribute('value') || o.getAttribute('data-value')) === step.value
         );
         if (optionEl) {
-          arLog(`[AR:dropdown]   MATCHED via selector "${sel}"`, {
-            text: trimmed(optionEl.textContent),
-            el: optionEl
-          });
+          arLog(`[AR:dropdown]   MATCHED via selector "${sel}"`, { text: trimmed(optionEl.textContent) });
           break;
+        }
+        if (candidates.length > 0) {
+          arLog(`[AR:dropdown]   selector "${sel}" found ${candidates.length} candidate(s):`,
+            candidates.slice(0, 5).map(o => trimmed(o.textContent)));
         }
       }
 
@@ -792,7 +811,6 @@
           '(3) recording=true listener re-fired.',
           { recording, replaying, clickTargetClass: clickTarget.className }
         );
-        // Try reopening using native click for nz-select, synthetic for others
         const retryTarget = getAntSelectClickTarget(el);
         arLog('[AR:dropdown] Attempting to reopen via', retryTarget.tagName, retryTarget.className);
         if (isNzSelect) {
@@ -801,10 +819,8 @@
           clickElement(retryTarget);
         }
         await waitFor(600);
-        arLog('[AR:dropdown] After reopen — ant-select-item-option count:',
-          document.querySelectorAll('.ant-select-item-option').length,
-          'nz-option-item count:', document.querySelectorAll('nz-option-item').length
-        );
+        arLog('[AR:dropdown] After reopen — nz-option-item:', document.querySelectorAll('nz-option-item').length,
+          'ant-select-item-option:', document.querySelectorAll('.ant-select-item-option').length);
       }
 
       if (optionEl) {
@@ -820,12 +836,11 @@
     arError('[AR:dropdown] ✖ No matching option found after 5 attempts. Escaping.', {
       targetText: step.optionText,
       targetValue: step.value,
-      allMatOptions: Array.from(document.querySelectorAll('mat-option')).map(o => trimmed(o.textContent)),
-      allNgOptions: Array.from(document.querySelectorAll('.ng-option')).map(o => trimmed(o.textContent)),
-      allRoleOptions: Array.from(document.querySelectorAll('[role="option"]')).map(o => trimmed(o.textContent)),
-      allAntOptions: Array.from(document.querySelectorAll('.ant-select-item-option')).map(o => trimmed(o.textContent)),
-      allNzOptions: Array.from(document.querySelectorAll('nz-option-item')).map(o => trimmed(o.textContent)),
-      allLiAntItems: Array.from(document.querySelectorAll('li.ant-select-item')).map(o => trimmed(o.textContent)),
+      antOptions: Array.from(document.querySelectorAll('.ant-select-item-option')).map(o => trimmed(o.textContent)),
+      nzOptions:  Array.from(document.querySelectorAll('nz-option-item')).map(o => trimmed(o.textContent)),
+      roleOptions: Array.from(document.querySelectorAll('[role="option"]')).map(o => trimmed(o.textContent)),
+      matOptions: Array.from(document.querySelectorAll('mat-option')).map(o => trimmed(o.textContent)),
+      ngOptions:  Array.from(document.querySelectorAll('.ng-option')).map(o => trimmed(o.textContent)),
     });
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   }
@@ -839,30 +854,59 @@
       if (step.selector.startsWith('/')) {
         el = queryByXPath(step.selector);
       } else {
-        try {
-          el = document.querySelector(step.selector);
-        } catch (e) { /* invalid CSS selector */ }
+        // Strip ng-zorro state classes from nz-select selectors recorded with old code.
+        // These classes (ant-select-open, ant-select-focused, ant-select-single, etc.)
+        // are dynamic — they are absent when replay starts and cause querySelector to fail.
+        let selector = step.selector;
+        if (selector.startsWith('nz-select')) {
+          selector = selector.replace(
+            /\.(ant-select-open|ant-select-focused|ant-select-single|ant-select-multiple|ant-select-show-arrow|ant-select-show-search|ant-select-allow-clear|ant-select-disabled|ant-select-loading|ant-select-borderless)\b/g,
+            ''
+          );
+          try {
+            el = document.querySelector(selector);
+          } catch (e) { el = null; }
+          if (!el) {
+            // Last resort: if only one nz-select on page use it; else can't resolve
+            const allNz = document.querySelectorAll('nz-select');
+            if (allNz.length === 1) el = allNz[0];
+          }
+        } else {
+          try {
+            el = document.querySelector(selector);
+          } catch (e) { /* invalid CSS selector */ }
+        }
       }
     }
 
-    // For 'select' steps on Ant Design: if the stored selector resolved to the inner
-    // search input (ant-select-selection-search-input), the correct click target is the
-    // nz-select container, not the input. Remap here so selectElement gets the right el.
-    // Also remap plain 'click' steps that land on the inner input — replay should click
-    // the .ant-select-selector surface, not the hidden search input.
+    // For 'select' steps on Ant Design: if the stored selector resolved to any element
+    // inside an nz-select (e.g. the hidden search input with id="cause_selector"), remap
+    // to the nz-select HOST so selectElement → openNzSelect → getAntSelectClickTarget
+    // can find the correct nz-select-top-control surface to click.
+    // Also remap plain 'click' steps that land on nz-select internals.
     if (el && (step.type === 'select' || step.type === 'click')) {
+      // First check: is this element inside an nz-select at all?
+      const nzHost = el.closest('nz-select') ||
+        (el.tagName === 'NZ-SELECT' ? el : null);
+      if (nzHost && nzHost !== el) {
+        arLog('[AR:resolveElement] remapped nz-select inner element → nz-select host', {
+          stepType: step.type,
+          from: { tag: el.tagName, id: el.id, class: el.className },
+          to: { tag: nzHost.tagName, id: nzHost.id, class: nzHost.className }
+        });
+        if (step.type === 'click') {
+          nzHost.__antSelectTriggerOnly = true;
+        }
+        return nzHost;
+      }
+      // Non-nz-select ant-select fallback
       const remapped = getAntSelectClickTarget(el);
       if (remapped !== el) {
-        arLog('[AR:resolveElement] remapped ant-select inner input → selector div', {
+        arLog('[AR:resolveElement] remapped ant-select inner input → selector surface', {
           stepType: step.type,
           from: { tag: el.tagName, class: el.className },
-          to: { tag: remapped.tagName, class: remapped.className },
-          note: step.type === 'click'
-            ? 'click on ant-select trigger — will be skipped in replay (no option to select)'
-            : 'select step remapped correctly'
+          to: { tag: remapped.tagName, class: remapped.className }
         });
-        // For click steps that landed on an ant-select trigger: mark with a flag so
-        // the replay loop can skip this step (opening dropdown with no option = no-op).
         if (step.type === 'click') {
           remapped.__antSelectTriggerOnly = true;
         }
