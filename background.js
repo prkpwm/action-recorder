@@ -17,6 +17,27 @@ async function sendToTab(tabId, message) {
   }
 }
 
+// Send a message to every frame (main + all iframes) in a tab.
+// Falls back to sendToTab (main frame only) when webNavigation API is unavailable.
+async function sendToAllFrames(tabId, message) {
+  let frames = null;
+  try {
+    frames = await chrome.webNavigation.getAllFrames({ tabId });
+  } catch (e) {
+    // webNavigation not available — send to main frame only
+    return sendToTab(tabId, message);
+  }
+  if (!frames || frames.length === 0) return sendToTab(tabId, message);
+  let anyOk = false;
+  for (const frame of frames) {
+    try {
+      await chrome.tabs.sendMessage(tabId, message, { frameId: frame.frameId });
+      anyOk = true;
+    } catch (e) { /* frame may not have content script — skip */ }
+  }
+  return anyOk;
+}
+
 async function ensureContentScript(tabId) {
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: [CONTENT_SCRIPT] });
@@ -94,23 +115,28 @@ async function broadcast(message) {
 
 async function startReplay(tabId, urlPattern, urlIsRegex) {
   const msg = { type: 'SET_REPLAY', value: true, urlPattern: urlPattern || '', urlIsRegex: !!urlIsRegex };
-  if (!await sendToTab(tabId, msg)) {
+  if (!await sendToAllFrames(tabId, msg)) {
     await ensureContentScript(tabId);
-    await sendToTab(tabId, msg);
+    await sendToAllFrames(tabId, msg);
   }
   return { ok: true };
 }
 
 async function stopReplay() {
-  await broadcast({ type: 'SET_REPLAY', value: false });
+  const tabs = await chrome.tabs.query({});
+  for (const t of tabs) {
+    if (t.id != null) {
+      try { await sendToAllFrames(t.id, { type: 'SET_REPLAY', value: false }); } catch { /* ignore */ }
+    }
+  }
   return { ok: true };
 }
 
 async function runSingleStep(tabId, suiteName, stepIndex) {
   const msg = { type: 'RUN_STEP', suiteName, stepIndex };
-  if (!await sendToTab(tabId, msg)) {
+  if (!await sendToAllFrames(tabId, msg)) {
     await ensureContentScript(tabId);
-    await sendToTab(tabId, msg);
+    await sendToAllFrames(tabId, msg);
   }
   return { ok: true };
 }

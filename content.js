@@ -25,8 +25,15 @@
   let lastStepTime = 0;
   const lastInputValues = new WeakMap();
 
+  // Tracks a button click that may have opened a file picker.
+  // If a file input change fires within FILE_CLICK_WINDOW ms, we retract the
+  // button click and record only the 'file' step (with triggerSelector).
+  // If no file is picked in time, the button click is committed as a normal click.
+  let pendingFileClickStep = null;   // { step, commitTimer }
+  const FILE_CLICK_WINDOW = 10000;   // ms to wait for a file-change after a button click
+
   // Debug logging — off by default; toggled by the popup "Hide debug logs" checkbox.
-  let arLogEnabled = false;
+  let arLogEnabled = true;
   const arLog = (...args) => { if (arLogEnabled) console.log(...args); };
   const arWarn = (...args) => { if (arLogEnabled) console.warn(...args); };
   const arError = (...args) => { if (arLogEnabled) console.error(...args); };
@@ -38,6 +45,23 @@
 
   const STYLE_ID = 'ar-style';
   const FLASH_CLS = 'ar-flash';
+
+  // ------------------------------------------------------------- iframe detection
+  // True when this content script is running inside an iframe (not the top frame).
+  const IS_IFRAME = window !== window.top;
+
+  // When running inside an iframe, overlay is rendered by the TOP frame.
+  // We postMessage the element rect + selector up to the parent so it can
+  // position the overlay correctly relative to the full viewport.
+  const AR_OVERLAY_MSG = '__ar_hover__';
+
+  // Top-frame: find the <iframe> element whose contentWindow matches `win`.
+  function findIframeByWindow(win) {
+    for (const iframe of document.querySelectorAll('iframe')) {
+      try { if (iframe.contentWindow === win) return iframe; } catch { /* cross-origin */ }
+    }
+    return null;
+  }
 
   // ------------------------------------------------------------- utils
   const esc = (s) => CSS.escape(s);
@@ -321,6 +345,17 @@
 
   async function recordStep(step) {
     if (!ctxOk()) return;
+
+    // A pending button click is waiting to see if a file picker opens.
+    // If something else is being recorded now (not a 'file' step), the button
+    // click was a real action — commit it first, then record this new step.
+    if (pendingFileClickStep && step.type !== 'file') {
+      clearTimeout(pendingFileClickStep.commitTimer);
+      const clickStep = pendingFileClickStep.step;
+      pendingFileClickStep = null;
+      await recordStep(clickStep); // commit the deferred click
+    }
+
     const now = Date.now();
     const delay = lastStepTime ? Math.min(Math.round(now - lastStepTime), 60000) : 0;
     lastStepTime = now;
@@ -440,21 +475,172 @@
       const hasTestId = el.getAttribute('data-testid') || el.getAttribute('data-qa');
       const hasRole = el.getAttribute('role');
       const isInteractive = el.getAttribute('tabindex') != null || el.getAttribute('aria-expanded') != null;
+      const hasFewChildren = el.children.length <= 5;
       if (!hasStableId && !hasTestId && !hasRole && !isInteractive && el.children.length > 5) {
         arLog('[AR:handleClick] suppressed — large layout container with no stable identity', {
           tag, children: el.children.length, class: el.className
         });
         return;
       }
+      // Also suppress non-interactive divs with no role that fire right after an upload
+      // trigger was deferred — these are bubbling events from the span click.
+      if (!hasRole && !isInteractive && hasFewChildren && pendingFileClickStep) {
+        arLog('[AR:handleClick] suppressed — non-interactive div bubbling after upload deferral', {
+          tag, id: el.id, class: el.className
+        });
+        return;
+      }
+    }
+
+    // Check if this click will open a file picker.
+    // Heuristic: a button/anchor inside a container that also contains a hidden
+    // file input is almost certainly a "choose file" trigger — defer it.
+    const nearbyFileInput = findNearbyFileInput(el);
+    if (nearbyFileInput) {
+      if (pendingFileClickStep) {
+        clearTimeout(pendingFileClickStep.commitTimer);
+        pendingFileClickStep = null;
+      }
+      const deferredStep = { type: 'click', selector: getBestSelector(el), ...elInfo(el) };
+      // If the trigger text is clearly upload-related, never commit as a standalone
+      // click — just wait indefinitely for the file input change.
+      const triggerText = trimmed(el.textContent || '');
+      const isUploadText = triggerText && /upload|อัปโหลด|choose.file|browse|เลือกไฟล์|แนบ/i.test(triggerText);
+      pendingFileClickStep = {
+        step: deferredStep,
+        fileInput: nearbyFileInput,
+        commitTimer: isUploadText ? null : setTimeout(() => {
+          // No file was picked in time — commit as a normal click
+          pendingFileClickStep = null;
+          recordStep(deferredStep);
+        }, FILE_CLICK_WINDOW)
+      };
+      arLog('[AR:handleClick] deferred — possible file-picker trigger:', getBestSelector(el), isUploadText ? '(indefinite)' : '');
+      return;
     }
 
     recordStep({ type: 'click', selector: getBestSelector(el), ...elInfo(el) });
+  }
+
+  // Returns a hidden/invisible file input that is "near" el in the DOM —
+  // shares an ancestor within 5 levels. Returns null if none found.
+  // Only triggers for interactive elements (BUTTON, A, SPAN, DIV with role/tabindex)
+  // to avoid false positives from large layout containers.
+  function findNearbyFileInput(el) {
+    // Walk up from the clicked element to find the nearest interactive trigger
+    // (elementFromPoint may hit an icon/img inside a span/button/a).
+    let trigger = el;
+    while (trigger) {
+      const tag = trigger.tagName;
+      if (tag === 'BUTTON' || tag === 'A' || tag === 'SPAN') break;
+      if (tag === 'DIV' && (trigger.getAttribute('role') || trigger.getAttribute('tabindex'))) break;
+      trigger = trigger.parentElement;
+      if (trigger === document.body) { trigger = null; break; }
+      if (!trigger) break;
+    }
+    if (!trigger) return null;
+    const triggerTag = trigger.tagName;
+    const isInteractiveTrigger =
+      triggerTag === 'BUTTON' || triggerTag === 'A' ||
+      triggerTag === 'SPAN' ||
+      (triggerTag === 'DIV' && (trigger.getAttribute('role') || trigger.getAttribute('tabindex')));
+    if (!isInteractiveTrigger) return null;
+
+    // If text implies upload, return any file input on the page — don't bother
+    // searching ancestors.
+    const text = trimmed(trigger.textContent || '');
+    const isUploadText = text && /upload|อัปโหลด|choose.file|browse|เลือกไฟล์|แนบ/i.test(text);
+
+    if (isUploadText) {
+      const allFileInputs = document.querySelectorAll('input[type="file"]');
+      if (allFileInputs.length > 0) return allFileInputs[0];
+      return null;
+    }
+
+    let node = trigger;
+    for (let depth = 0; depth < 6; depth++) {
+      if (!node || !node.parentElement) break;
+      node = node.parentElement;
+      const inp = node.querySelector('input[type="file"]');
+      if (inp) return inp;
+    }
+    return null;
+  }
+
+  // ------------------------------------------------------------------- replay file-upload skip
+  // At replay time a recorded "click upload" button would open the native OS file
+  // picker — which we DO NOT want when the file step below injects its stored
+  // base64 data directly (openFileInput → DataTransfer, no picker). So before
+  // replaying a click we look ahead: if a 'file' step that injects stored data
+  // follows (ignoring only layout-container bubbling clicks) and this click is the
+  // upload-trigger for THAT same <input type="file">, we skip the click.
+
+  // Find the <input type="file"> that clicking `el` would open, by climbing the
+  // DOM. Mirrors findNearbyFileInput but searches deeper and drops the
+  // "interactive trigger" gate — it's only consulted when a concrete following
+  // 'file' step exists to associate with.
+  function findAssociatedFileInput(el) {
+    if (!(el instanceof Element)) return null;
+    if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'file') return el;
+    let node = el;
+    for (let depth = 0; depth < 10 && node && node.parentElement; depth++) {
+      node = node.parentElement;
+      const inp = node.querySelector('input[type="file"]');
+      if (inp) return inp;
+    }
+    return null;
+  }
+
+  // Resolve a step to its raw element WITHOUT nz-select remapping (used for the
+  // lookahead file-input association check).
+  function resolvePlainElement(step) {
+    if (!step || !step.selector) return null;
+    try {
+      return step.selector.startsWith('/')
+        ? queryByXPath(step.selector)
+        : document.querySelector(step.selector);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // True when, scanning forward from `index`, the next non-layout-blocking step is
+  // a 'file' step that injects stored fileData into the SAME file input that
+  // clicking `clickEl` opens. When true the caller should skip that click.
+  function fileUploadInjectFollows(steps, index, clickEl) {
+    const myInput = findAssociatedFileInput(clickEl);
+    for (let j = index + 1; j < steps.length; j++) {
+      const s = steps[j];
+      if (s.type === 'file') {
+        // Only skip when we can inject directly (stored data present).
+        if (!(s.fileData && s.fileData.length > 0)) return false;
+        // If we found the associated file input via DOM, verify match.
+        if (myInput) {
+          const fileEl = resolvePlainElement(s);
+          return !!fileEl && fileEl === myInput;
+        }
+        // Fallback: no DOM association found, but a file step follows within 2 steps.
+        // The click is likely an upload trigger (e.g., clicking "อัปโหลด" span).
+        // Skip it so the file can be injected directly.
+        if (j - index <= 3) return true;
+        return false;
+      }
+      if (s.type === 'click') {
+        const cand = resolvePlainElement(s);
+        if (cand && isLayoutContainer(cand)) continue; // bubbling noise — keep looking
+      }
+      return false; // any other step in between
+    }
+    return false;
   }
 
   function handleInput(e) {
     if (!recording || replaying) return;
     const el = e.target;
     if (!(el instanceof Element)) return;
+    // Skip file inputs — their value is "C:\fakepath\..." which is not replayable.
+    // File attachments are captured via the 'change' event handler below.
+    if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'file') return;
     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
       recordFill(el, true);
     }
@@ -477,6 +663,42 @@
       });
     } else if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
       recordFill(el, true);
+    } else if (el.tagName === 'INPUT' && el.type === 'file') {
+      // File input — retract any pending button click (it was just the picker trigger)
+      // then read each file as base64 so replay can inject without opening a dialog.
+      let triggerSelector = null;
+      if (pendingFileClickStep) {
+        clearTimeout(pendingFileClickStep.commitTimer);
+        triggerSelector = pendingFileClickStep.step.selector;
+        pendingFileClickStep = null;
+        arLog('[AR:handleChange] retracted pending click — recording file step instead, triggerSelector:', triggerSelector);
+      }
+
+      const fileList = Array.from(el.files || []);
+      if (!fileList.length) return;
+      Promise.all(
+        fileList.map(
+          (f) =>
+            new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () =>
+                resolve({ name: f.name, type: f.type, dataUrl: reader.result });
+              reader.onerror = () =>
+                resolve({ name: f.name, type: f.type, dataUrl: null });
+              reader.readAsDataURL(f);
+            })
+        )
+      ).then((fileData) => {
+        recordStep({
+          type: 'file',
+          selector: getBestSelector(el),
+          triggerSelector,   // the button that opened the picker (null if input clicked directly)
+          name: el.getAttribute('name') || el.getAttribute('id') || '',
+          accept: el.getAttribute('accept') || '',
+          files: fileData.map((d) => d.name),
+          fileData // [{ name, type, dataUrl }]
+        });
+      });
     }
   }
 
@@ -485,13 +707,42 @@
     const el = e.target;
     if (!(el instanceof Element)) return;
     if (el === lastHoverEl) return;
+
+    // Top frame: skip hover on <iframe> elements themselves — the child frame's
+    // own content script handles hover inside and will postMessage the overlay up.
+    if (!IS_IFRAME && el.tagName === 'IFRAME') return;
+
     lastHoverEl = el;
+
+    // Skip overlay on large layout containers — they have no stable selector and
+    // produce a full-page red border that visually obscures the page content.
+    if (isLayoutContainer(el)) {
+      hideOverlay();
+      safeSend({ type: 'HOVER_SELECTOR', selector: '' });
+      return;
+    }
+
     const selector = getBestSelector(el);
     positionOverlay(el, selector);
     safeSend({ type: 'HOVER_SELECTOR', selector });
   }
 
-  function clearHover() {
+  function clearHover(e) {
+    // Inside an iframe: only hide when the mouse is truly leaving the iframe's
+    // document (relatedTarget is null = left the window entirely, or is the
+    // <html>/<body> root going out). Moving between child elements fires mouseout
+    // too but relatedTarget will still be inside this document — ignore those.
+    if (IS_IFRAME && e && e.relatedTarget && document.documentElement.contains(e.relatedTarget)) {
+      return; // still inside the iframe — don't hide
+    }
+
+    // Top frame: if the pointer just entered an iframe element, the iframe's own
+    // content script will take over hover. Don't hide — let the postMessage from
+    // the child frame update the overlay instead.
+    if (!IS_IFRAME && e && e.relatedTarget instanceof Element && e.relatedTarget.tagName === 'IFRAME') {
+      return;
+    }
+
     lastHoverEl = null;
     hideOverlay();
     if (recording) safeSend({ type: 'HOVER_SELECTOR', selector: '' });
@@ -502,6 +753,9 @@
   let hoverLabel = null;
 
   function getOrCreateOverlay() {
+    // The overlay is always rendered in the top frame. When running inside an
+    // iframe we postMessage up to the top frame instead of touching the DOM here.
+    if (IS_IFRAME) return null;
     if (hoverOverlay) return hoverOverlay;
 
     hoverOverlay = document.createElement('div');
@@ -539,23 +793,22 @@
     return hoverOverlay;
   }
 
-  function positionOverlay(el, selector) {
+  // Render the overlay at the given viewport-relative rect (already offset by
+  // iframe position when called from the top-frame postMessage handler).
+  function positionOverlayAtRect(rect, selector) {
     const overlay = getOrCreateOverlay();
-    const r = el.getBoundingClientRect();
+    if (!overlay) return;
 
-    // Size the overlay to exactly cover the element
-    overlay.style.top    = (r.top  - 2) + 'px';
-    overlay.style.left   = (r.left - 2) + 'px';
-    overlay.style.width  = (r.width  + 4) + 'px';
-    overlay.style.height = (r.height + 4) + 'px';
+    overlay.style.top    = (rect.top  - 2) + 'px';
+    overlay.style.left   = (rect.left - 2) + 'px';
+    overlay.style.width  = (rect.width  + 4) + 'px';
+    overlay.style.height = (rect.height + 4) + 'px';
     overlay.style.display = 'block';
 
     if (hoverLabel) {
       hoverLabel.textContent = selector || '';
       const labelH = hoverLabel.offsetHeight || 20;
-
-      // Prefer above the top border; fall back to inside-top if no room
-      if (r.top - 2 >= labelH + 2) {
+      if (rect.top - 2 >= labelH + 2) {
         hoverLabel.style.top    = (-labelH - 2) + 'px';
         hoverLabel.style.bottom = '';
       } else {
@@ -565,8 +818,59 @@
     }
   }
 
+  function positionOverlay(el, selector) {
+    const r = el.getBoundingClientRect();
+
+    if (IS_IFRAME) {
+      // Send rect + selector up to the top frame; it will add the iframe offset
+      // and render the overlay there so it appears at the correct screen position.
+      try {
+        window.top.postMessage({
+          type: AR_OVERLAY_MSG,
+          action: 'show',
+          rect: { top: r.top, left: r.left, width: r.width, height: r.height },
+          selector,
+          sourceOrigin: location.origin
+        }, '*');
+      } catch { /* cross-origin top — silently ignore */ }
+      return;
+    }
+
+    // Top frame: render directly (no offset needed).
+    positionOverlayAtRect(r, selector);
+  }
+
   function hideOverlay() {
+    if (IS_IFRAME) {
+      try {
+        window.top.postMessage({ type: AR_OVERLAY_MSG, action: 'hide' }, '*');
+      } catch { /* cross-origin top */ }
+      return;
+    }
     if (hoverOverlay) hoverOverlay.style.display = 'none';
+  }
+
+  // Top-frame listener: receives overlay commands from child iframes.
+  if (!IS_IFRAME) {
+    window.addEventListener('message', (e) => {
+      if (!e.data || e.data.type !== AR_OVERLAY_MSG) return;
+      if (e.data.action === 'hide') {
+        if (hoverOverlay) hoverOverlay.style.display = 'none';
+        return;
+      }
+      if (e.data.action === 'show') {
+        const iframe = findIframeByWindow(e.source);
+        if (!iframe) return;
+        const iframeRect = iframe.getBoundingClientRect();
+        const r = e.data.rect;
+        positionOverlayAtRect({
+          top:    r.top  + iframeRect.top,
+          left:   r.left + iframeRect.left,
+          width:  r.width,
+          height: r.height
+        }, e.data.selector);
+      }
+    });
   }
   function ensureStyle() {
     if (document.getElementById(STYLE_ID)) return;
@@ -845,6 +1149,106 @@
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   }
 
+  // Inject recorded files into a file input via DataTransfer — no OS picker opened.
+  // Falls back to opening the picker (with a warning) only when no base64 data was stored.
+  async function openFileInput(el, step, stepNum) {
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    flash(el);
+
+    const fileData = step.fileData;
+    if (fileData && fileData.length > 0) {
+      try {
+        // Reconstruct File objects from stored base64 DataURLs
+        const dt = new DataTransfer();
+        for (const fd of fileData) {
+          if (!fd.dataUrl) continue;
+          const [meta, b64] = fd.dataUrl.split(',');
+          const mime = (meta.match(/:(.*?);/) || [])[1] || fd.type || 'application/octet-stream';
+          const binary = atob(b64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          dt.items.add(new File([bytes], fd.name, { type: mime }));
+        }
+
+        if (dt.files.length > 0) {
+          // The ONLY reliable cross-browser way to set files on an input:
+          // assign the DataTransfer's FileList directly to the input's `files`
+          // property via the native property descriptor (which has a setter in
+          // Chromium).  If that fails, fall back to Object.defineProperty.
+          const nativeDesc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files');
+          if (nativeDesc && typeof nativeDesc.set === 'function') {
+            nativeDesc.set.call(el, dt.files);
+          } else {
+            try {
+              Object.defineProperty(el, 'files', { value: dt.files, writable: true, configurable: true });
+            } catch (_) {
+              el.files = dt.files; // last resort
+            }
+          }
+
+          // Dispatch inside a macrotask so Angular's NgZone intercepts it and
+          // runs change detection, which triggers FileReader → preview update.
+          await new Promise((resolve) => {
+            setTimeout(() => {
+              el.dispatchEvent(new Event('input',  { bubbles: true, cancelable: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+              resolve();
+            }, 0);
+          });
+
+          // Give Angular time to run FileReader and render the preview image.
+          await waitFor(1000);
+
+          arLog(`[AR:openFileInput] step ${stepNum} — injected ${dt.files.length} file(s):`,
+            Array.from(dt.files).map((f) => f.name));
+          safeSend({
+            type: 'REPLAY_EVENT',
+            data: { level: 'info', step: stepNum, text: `Step ${stepNum}: Injected file — ${step.files.join(', ')}` }
+          });
+          return;
+        }
+      } catch (err) {
+        arWarn('[AR:openFileInput] DataTransfer inject failed:', err);
+      }
+    }
+  
+
+    // Fallback — no stored data: open the picker and wait for manual selection
+    const fileNames = (step.files || []).join(', ') || 'file';
+    safeSend({
+      type: 'REPLAY_EVENT',
+      data: { level: 'warn', step: stepNum, text: `Step ${stepNum}: No file data stored — please select manually: ${fileNames}` }
+    });
+
+    const origDisplay    = el.style.display;
+    const origVisibility = el.style.visibility;
+    const origOpacity    = el.style.opacity;
+    if (getComputedStyle(el).display     === 'none')   el.style.display     = 'inline-block';
+    if (getComputedStyle(el).visibility  === 'hidden') el.style.visibility  = 'visible';
+    if (getComputedStyle(el).opacity     === '0')      el.style.opacity     = '1';
+
+    el.click();
+
+    let waited = 0;
+    while (waited < 30000) {
+      await waitFor(500);
+      waited += 500;
+      if (replayCancel) break;
+      if (el.files && el.files.length > 0) break;
+    }
+
+    el.style.display     = origDisplay;
+    el.style.visibility  = origVisibility;
+    el.style.opacity     = origOpacity;
+
+    if (!el.files || el.files.length === 0) {
+      safeSend({
+        type: 'REPLAY_EVENT',
+        data: { level: 'warn', step: stepNum, text: `Step ${stepNum}: No file selected — skipping` }
+      });
+    }
+  }
+
   // Resolve a step's element via its selector.
   // If the stored selector is an XPath (starts with / or //) evaluate it directly;
   // otherwise use document.querySelector (CSS selector).
@@ -935,8 +1339,38 @@
   async function runReplay(urlPattern, urlIsRegex) {
     if (!ctxOk()) return;
 
-    // --- URL guard
-    if (urlPattern) {
+    // Read the active suite's session first — we need session.url to decide
+    // which frame (top vs iframe) is the correct one to run this replay.
+    const { arActiveSuite } = await storageGet('arActiveSuite');
+    const suiteName = arActiveSuite || 'suite1';
+    const key = suiteKey(suiteName);
+    const stored = await storageGet(key);
+    const session = stored[key];
+
+    if (!session || !session.steps || !session.steps.length) return;
+
+    // --- Frame ownership check ---
+    // When background.js sends SET_REPLAY to ALL frames, every frame's content
+    // script receives it. Only the frame whose location.href matches the recorded
+    // session URL should actually run the replay. Other frames bail out silently
+    // (no REPLAY_FINISHED sent) so the popup doesn't get confused.
+    //
+    // Priority:
+    //  1. If session.url is set, the frame that matches it owns the replay.
+    //  2. If session.url is blank (legacy), fall back to urlPattern matching.
+    //  3. If no urlPattern either, the top frame (IS_IFRAME === false) runs it.
+    const sessionUrl = session.url || '';
+    if (sessionUrl) {
+      const frameMatchesSession =
+        location.href === sessionUrl ||
+        location.href.startsWith(sessionUrl);
+      if (!frameMatchesSession) {
+        // This frame doesn't own these steps — skip silently.
+        arLog('[AR:runReplay] skipping — session URL is', sessionUrl, ', this frame is', location.href);
+        return;
+      }
+    } else if (urlPattern) {
+      // Legacy path: no session.url stored — match against popup's urlPattern.
       let matches = false;
       try {
         matches = urlIsRegex
@@ -946,22 +1380,20 @@
         matches = false;
       }
       if (!matches) {
-        safeSend({
-          type: 'REPLAY_EVENT',
-          data: { level: 'error', step: 0, text: `URL mismatch — expected: ${urlPattern}  got: ${location.href}` }
-        });
-        safeSend({ type: 'REPLAY_FINISHED' });
+        // Only the top frame reports URL mismatch — iframes bail silently.
+        if (!IS_IFRAME) {
+          safeSend({
+            type: 'REPLAY_EVENT',
+            data: { level: 'error', step: 0, text: `URL mismatch — expected: ${urlPattern}  got: ${location.href}` }
+          });
+          safeSend({ type: 'REPLAY_FINISHED' });
+        }
         return;
       }
+    } else if (IS_IFRAME) {
+      // No URL hints at all — top frame handles it, iframe skips.
+      return;
     }
-    // Read the active suite's session.
-    const { arActiveSuite } = await storageGet('arActiveSuite');
-    const suiteName = arActiveSuite || 'suite1';
-    const key = suiteKey(suiteName);
-    const stored = await storageGet(key);
-    const session = stored[key];
-
-    if (!session || !session.steps || !session.steps.length) return;
     if (recording) setRecording(false);
 
     replaying = true;
@@ -986,6 +1418,26 @@
     for (let i = 0; i < steps.length; i++) {
       if (replayCancel) break;
       const step = steps[i];
+
+      // Skip upload-trigger clicks — a file step follows and injects data directly.
+      // Opening the native file picker would block replay.
+      if (step.type === 'click' && (step.tag === 'SPAN' || step.tag === 'BUTTON' || step.tag === 'A')) {
+        const txt = trimmed(step.text || '');
+        if (txt && /upload|อัปโหลด|choose.file|browse|เลือกไฟล์|แนบ/i.test(txt)) {
+          let hasFollowingFile = false;
+          for (let j = i + 1; j < steps.length && j <= i + 3; j++) {
+            if (steps[j].type === 'file') { hasFollowingFile = true; break; }
+            if (steps[j].type !== 'click') break;
+          }
+          if (hasFollowingFile) {
+            arLog('[AR:replay] skipping upload-trigger click:', step.selector, step.text);
+            safeSend({ type: 'REPLAY_EVENT', data: { level: 'info', step: i + 1, text: `Skipped Upload trigger (step ${i + 1}) — file is injected directly` } });
+            await waitFor(250);
+            continue;
+          }
+        }
+      }
+
       safeSend({ type: 'REPLAY_STEP', data: { current: i + 1, total: steps.length, selector: step.selector, stepType: step.type } });
       await waitFor(step.delay > 0 ? Math.min(step.delay, 10000) : 500);
       if (replayCancel) break;
@@ -1012,6 +1464,14 @@
         }
         try {
           if (step.type === 'click') {
+            // Skip upload-trigger clicks that just open the native file picker —
+            // the following 'file' step injects its stored data directly instead.
+            if (fileUploadInjectFollows(steps, i, found)) {
+              safeSend({ type: 'REPLAY_EVENT', data: { level: 'info', step: i + 1, text: `Skipped file-upload trigger click (step ${i + 1}) — file is injected directly` } });
+              arLog('[AR:replay] skipped file-upload trigger click:', step.selector);
+              await waitFor(250);
+              continue;
+            }
             if (isLayoutContainer(found)) {
               // Hover-only step — sidebar/nav containers expand on mouseenter, not click
               arLog(`[AR:replay] step ${i + 1} — layout container, hover-only (no click)`);
@@ -1023,6 +1483,7 @@
           }
           else if (step.type === 'fill') await fillElement(found, step);
           else if (step.type === 'select') await selectElement(found, step);
+          else if (step.type === 'file') await openFileInput(found, step, i + 1);
         } catch (err) {
           safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: i + 1, text: `Step ${i + 1} failed: ${err}` } });
         }
@@ -1038,6 +1499,14 @@
       }
       try {
         if (step.type === 'click') {
+          // Skip upload-trigger clicks that just open the native file picker —
+          // the following 'file' step injects its stored data directly instead.
+          if (fileUploadInjectFollows(steps, i, el)) {
+            safeSend({ type: 'REPLAY_EVENT', data: { level: 'info', step: i + 1, text: `Skipped file-upload trigger click (step ${i + 1}) — file is injected directly` } });
+            arLog('[AR:replay] skipped file-upload trigger click:', step.selector);
+            await waitFor(250);
+            continue;
+          }
           if (isLayoutContainer(el)) {
             // Hover-only step — sidebar/nav containers expand on mouseenter, not click
             arLog(`[AR:replay] step ${i + 1} — layout container, hover-only (no click)`);
@@ -1049,6 +1518,7 @@
         }
         else if (step.type === 'fill') await fillElement(el, step);
         else if (step.type === 'select') await selectElement(el, step);
+        else if (step.type === 'file') await openFileInput(el, step, i + 1);
       } catch (err) {
         safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: i + 1, text: `Step ${i + 1} failed: ${err}` } });
       }
@@ -1079,6 +1549,22 @@
     const step = session.steps[stepIndex];
     if (!step) return;
 
+    // Frame ownership: the step carries the URL of the frame it was recorded in.
+    // Only the frame whose location.href matches step.url should execute it.
+    // Other frames bail silently so only one frame runs each step.
+    if (step.url) {
+      const frameMatches =
+        location.href === step.url ||
+        location.href.startsWith(step.url);
+      if (!frameMatches) {
+        arLog('[AR:runSingleStep] skipping — step.url is', step.url, ', this frame is', location.href);
+        return;
+      }
+    } else if (IS_IFRAME) {
+      // No URL on step (legacy) — top frame handles it
+      return;
+    }
+
     replaying = true;
     replayCancel = false;
 
@@ -1099,6 +1585,25 @@
       safeSend({ type: 'REPLAY_EVENT', data: { level: 'warn', step: stepIndex + 1, text: `Element not found: ${step.selector}` } });
     } else if (el.__antSelectTriggerOnly) {
       safeSend({ type: 'REPLAY_EVENT', data: { level: 'warn', step: stepIndex + 1, text: `Skipped ant-select trigger-only click — re-record this dropdown selection` } });
+    } else if (step.type === 'click' && (step.tag === 'SPAN' || step.tag === 'BUTTON' || step.tag === 'A')) {
+      // Skip upload-trigger clicks — file step injects data directly
+      const txt = trimmed(step.text || '');
+      if (/upload|อัปโหลด|choose.file|browse|เลือกไฟล์|แนบ/i.test(txt)) {
+        const allSteps = session.steps;
+        let hasFollowingFile = false;
+        for (let j = stepIndex + 1; j < allSteps.length && j <= stepIndex + 3; j++) {
+          if (allSteps[j].type === 'file') { hasFollowingFile = true; break; }
+          if (allSteps[j].type !== 'click') break;
+        }
+        if (hasFollowingFile) {
+          arLog('[AR:replay] single-step: skipping upload-trigger click:', step.selector);
+          safeSend({ type: 'REPLAY_EVENT', data: { level: 'info', step: stepIndex + 1, text: `Skipped file-upload trigger click (step ${stepIndex + 1}) — file is injected directly` } });
+        } else {
+          clickElement(el);
+        }
+      } else {
+        clickElement(el);
+      }
     } else {
       try {
         if (step.type === 'click') {
@@ -1112,6 +1617,8 @@
           await fillElement(el, step);
         } else if (step.type === 'select') {
           await selectElement(el, step);
+        } else if (step.type === 'file') {
+          await openFileInput(el, step, stepIndex + 1);
         }
       } catch (err) {
         safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: stepIndex + 1, text: `Step ${stepIndex + 1} failed: ${err}` } });

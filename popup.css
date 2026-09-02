@@ -16,6 +16,8 @@
     --fill-text: #059669;
     --select-bg: #fdf4ff;
     --select-text: #7c3aed;
+    --file-bg: #fff7ed;
+    --file-text: #c2410c;
     --font: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
@@ -263,6 +265,11 @@ h3 {
 .badge.b-select {
     background: var(--select-bg);
     color: var(--select-text);
+}
+
+.badge.b-file {
+    background: var(--file-bg);
+    color: var(--file-text);
 }
 
 .step-body {

@@ -70,23 +70,43 @@
     // Auto-select the suite whose urlPattern matches the current tab URL,
     // but only once on popup open — not on every storage-change refresh.
     // This prevents auto-select from overriding the user's manual suite choice.
+    // Priority: if the current active suite already matches the URL, keep it.
+    // Only switch when the active suite does NOT match but another suite does.
     if (!autoSelectDone && !recordingState.active && suites.length > 1) {
       autoSelectDone = true;
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
       if (tab && tab.url && /^https?:/.test(tab.url)) {
-        const matched = await findMatchingSuite(suites, tab.url);
-        if (matched && matched !== activeSuite) {
-          const switchRes = await sendMsg('SWITCH_SUITE', { suiteName: matched });
-          if (switchRes.ok) {
-            activeSuite = matched;
-            const infoRes = await sendMsg('GET_SESSION_INFO');
-            if (infoRes.ok) currentSession = infoRes.session;
+        // Check if the currently active suite already matches — if so, stay on it.
+        const activeAlreadyMatches = await suiteMatchesUrl(activeSuite, tab.url);
+        if (!activeAlreadyMatches) {
+          const matched = await findMatchingSuite(suites, tab.url);
+          if (matched && matched !== activeSuite) {
+            const switchRes = await sendMsg('SWITCH_SUITE', { suiteName: matched });
+            if (switchRes.ok) {
+              activeSuite = matched;
+              const infoRes = await sendMsg('GET_SESSION_INFO');
+              if (infoRes.ok) currentSession = infoRes.session;
+            }
           }
         }
       }
     }
 
     render();
+  }
+
+  // Returns true when the given suite's urlPattern matches the given URL.
+  async function suiteMatchesUrl(suiteName, url) {
+    const stored = await chrome.storage.local.get(`arSession__${suiteName}`);
+    const session = stored[`arSession__${suiteName}`];
+    if (!session) return false;
+    const pattern = session.urlPattern || session.url || '';
+    if (!pattern) return false;
+    try {
+      return session.urlIsRegex
+        ? new RegExp(pattern).test(url)
+        : url.startsWith(pattern) || url === pattern;
+    } catch (e) { return false; }
   }
 
   // Load all suite sessions and return the name of the first one whose
@@ -266,8 +286,8 @@
       idx.textContent = String(i + 1);
 
       const badge = document.createElement('span');
-      badge.className = 'badge ' + (step.type === 'click' ? 'b-click' : step.type === 'select' ? 'b-select' : 'b-fill');
-      badge.textContent = step.type === 'click' ? 'CLICK' : step.type === 'select' ? 'SELECT' : 'FILL';
+      badge.className = 'badge ' + (step.type === 'click' ? 'b-click' : step.type === 'select' ? 'b-select' : step.type === 'file' ? 'b-file' : 'b-fill');
+      badge.textContent = step.type === 'click' ? 'CLICK' : step.type === 'select' ? 'SELECT' : step.type === 'file' ? 'FILE' : 'FILL';
 
       const body = document.createElement('div');
       body.className = 'step-body';
@@ -281,6 +301,7 @@
       val.className = 'step-val';
       if (step.type === 'select') val.textContent = `option: ${step.optionText || step.value}`;
       else if (step.type === 'fill') val.textContent = `value: ${step.value}`;
+      else if (step.type === 'file') val.textContent = step.files && step.files.length ? step.files.join(', ') : '(no file)';
       else if (step.text) val.textContent = `text: ${step.text}`;
       else if (step.href) val.textContent = step.href;
 
