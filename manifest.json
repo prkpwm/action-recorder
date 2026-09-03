@@ -3,7 +3,7 @@
   "name": "Action Recorder",
   "version": "1.0.0",
   "description": "Record clicks and values filled into inputs on any page, then export them as JSON or replay them.",
-  "permissions": ["storage", "scripting", "tabs", "activeTab", "webNavigation"],
+  "permissions": ["storage", "scripting", "tabs", "activeTab", "webNavigation", "webRequest", "debugger"],
   "host_permissions": ["http://*/", "https://*/"],
   "background": {
     "service_worker": "background.js"

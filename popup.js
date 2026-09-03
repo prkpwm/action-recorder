@@ -72,7 +72,7 @@
     // This prevents auto-select from overriding the user's manual suite choice.
     // Priority: if the current active suite already matches the URL, keep it.
     // Only switch when the active suite does NOT match but another suite does.
-    if (!autoSelectDone && !recordingState.active && suites.length > 1) {
+    if (!autoSelectDone && !recordingState.active) {
       autoSelectDone = true;
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
       if (tab && tab.url && /^https?:/.test(tab.url)) {
@@ -86,6 +86,17 @@
               activeSuite = matched;
               const infoRes = await sendMsg('GET_SESSION_INFO');
               if (infoRes.ok) currentSession = infoRes.session;
+            }
+          } else if (!matched) {
+            const pathSegments = new URL(tab.url).pathname.split('/').filter(Boolean);
+            const suiteName = pathSegments[pathSegments.length - 1];
+            if (suiteName && !suites.includes(suiteName)) {
+              const addRes = await sendMsg('ADD_SUITE', { suiteName });
+              if (addRes.ok) {
+                suites = addRes.suites;
+                activeSuite = addRes.active;
+                currentSession = null;
+              }
             }
           }
         }
@@ -142,18 +153,46 @@
       btn.classList.remove('recording');
     }
 
+    // --- pause button — only visible while recording
+    const pauseBtn = $('pauseBtn');
+    if (recordingState.active) {
+      pauseBtn.removeAttribute('hidden');
+      if (recordingState.paused) {
+        pauseBtn.textContent = '▶ Resume';
+        pauseBtn.classList.add('paused');
+      } else {
+        pauseBtn.textContent = '⏸ Pause';
+        pauseBtn.classList.remove('paused');
+      }
+    } else {
+      pauseBtn.setAttribute('hidden', '');
+      pauseBtn.classList.remove('paused');
+    }
+
     // --- action buttons
     $('replayBtn').disabled = steps.length === 0 || recordingState.active || isReplaying;
     $('stopReplayBtn').disabled = !isReplaying;
     $('exportBtn').disabled = steps.length === 0;
     $('clearBtn').disabled = steps.length === 0 && !recordingState.active;
 
+    // While recording, hide the replay/export/clear rows so only recording
+    // controls (Stop + Pause) are shown.
+    if (recordingState.active) {
+      $('replayRow').setAttribute('hidden', '');
+      $('exportRow').setAttribute('hidden', '');
+    } else {
+      $('replayRow').removeAttribute('hidden');
+      $('exportRow').removeAttribute('hidden');
+    }
+
     // --- status dot
     const dot = $('statusDot');
     const line = $('statusLine');
     if (recordingState.active) {
       dot.classList.add('on');
-      line.textContent = `Recording — ${suiteShortName(activeSuite)}`;
+      line.textContent = recordingState.paused
+        ? `Paused — ${suiteShortName(activeSuite)}`
+        : `Recording — ${suiteShortName(activeSuite)}`;
     } else if (isReplaying) {
       dot.classList.add('on');
       line.textContent = `Replaying — ${suiteShortName(activeSuite)}`;
@@ -286,8 +325,8 @@
       idx.textContent = String(i + 1);
 
       const badge = document.createElement('span');
-      badge.className = 'badge ' + (step.type === 'click' ? 'b-click' : step.type === 'select' ? 'b-select' : step.type === 'file' ? 'b-file' : 'b-fill');
-      badge.textContent = step.type === 'click' ? 'CLICK' : step.type === 'select' ? 'SELECT' : step.type === 'file' ? 'FILE' : 'FILL';
+      badge.className = 'badge ' + (step.type === 'click' ? 'b-click' : step.type === 'select' ? 'b-select' : step.type === 'file' ? 'b-file' : step.type === 'date' || step.type === 'datepick' ? 'b-date' : 'b-fill');
+      badge.textContent = step.type === 'click' ? 'CLICK' : step.type === 'select' ? 'SELECT' : step.type === 'file' ? 'FILE' : step.type === 'date' || step.type === 'datepick' ? 'DATE' : 'FILL';
 
       const body = document.createElement('div');
       body.className = 'step-body';
@@ -318,6 +357,13 @@
       runBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><path d="M8 5v14l11-7z"/></svg>';
       runBtn.addEventListener('click', () => runStep(i));
 
+      // Play-from-here button — replays from this step to the end
+      const playFromBtn = document.createElement('button');
+      playFromBtn.className = 'step-btn step-btn--playfrom';
+      playFromBtn.title = `Replay from step ${i + 1} to the end`;
+      playFromBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg>';
+      playFromBtn.addEventListener('click', () => replay(i));
+
       const editBtn = document.createElement('button');
       editBtn.className = 'step-btn step-btn--edit';
       editBtn.title = 'Edit step';
@@ -330,7 +376,18 @@
       delBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><path d="M7 21C6.45 21 5.979 20.804 5.587 20.412C5.195 20.02 5 19.55 5 19V6H4V4H9V3H15V4H20V6H19V19C19 19.55 18.804 20.021 18.412 20.413C18.02 20.805 17.55 21 17 21H7Z"/></svg>';
       delBtn.addEventListener('click', () => deleteStep(i));
 
-      actions.append(runBtn, editBtn, delBtn);
+      actions.append(runBtn, playFromBtn, editBtn, delBtn);
+
+      // Network button — only when requests were captured
+      const reqs = step.networkRequests;
+      if (reqs && reqs.length > 0) {
+        const netBtn = document.createElement('button');
+        netBtn.className = 'step-btn step-btn--net';
+        netBtn.title = `${reqs.length} network request${reqs.length > 1 ? 's' : ''}`;
+        netBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><path d="M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3c-1.65-1.66-4.34-1.66-6 0zm-4-4 2 2c2.76-2.76 7.24-2.76 10 0l2-2C15.14 9.14 8.87 9.14 5 13z"/></svg><span class="net-btn-count">${reqs.length}</span>`;
+        netBtn.addEventListener('click', () => openNetModal(step));
+        actions.appendChild(netBtn);
+      }
 
       const top = document.createElement('div');
       top.className = 'step-top';
@@ -435,6 +492,104 @@
   function closeConfirmModal(result) {
     $('confirmModal').setAttribute('hidden', '');
     if (_confirmResolve) { _confirmResolve(result); _confirmResolve = null; }
+  }
+
+  // ------------------------------------------------------------- network modal
+  function openNetModal(step) {
+    const reqs = step.networkRequests || [];
+    const badgeEl = $('netModalBadge');
+    badgeEl.className = 'badge ' + (step.type === 'click' ? 'b-click' : step.type === 'select' ? 'b-select' : step.type === 'file' ? 'b-file' : step.type === 'date' || step.type === 'datepick' ? 'b-date' : 'b-fill');
+    badgeEl.textContent = step.type.toUpperCase();
+    $('netModalSelector').textContent = step.selector || '';
+    $('netModalSelector').title = step.selector || '';
+
+    const list = $('netModalList');
+    list.innerHTML = '';
+
+    reqs.forEach((r, idx) => {
+      const statusCls = r.status >= 200 && r.status < 300 ? 'net-ok'
+        : r.status >= 400 || r.status === 0 ? 'net-err' : 'net-warn';
+
+      // Header row — always visible
+      const header = document.createElement('div');
+      header.className = 'nm-header';
+
+      const statusSpan = document.createElement('span');
+      statusSpan.className = `net-status ${statusCls}`;
+      statusSpan.textContent = r.status || 'ERR';
+
+      const methodSpan = document.createElement('span');
+      methodSpan.className = 'net-method';
+      methodSpan.textContent = (r.method || 'GET').toUpperCase();
+
+      const urlSpan = document.createElement('span');
+      urlSpan.className = 'nm-url';
+      try {
+        const u = new URL(r.url);
+        urlSpan.textContent = u.pathname + u.search;
+      } catch { urlSpan.textContent = r.url; }
+      urlSpan.title = r.url;
+
+      const durSpan = document.createElement('span');
+      durSpan.className = 'net-dur';
+      durSpan.textContent = r.duration != null ? `${r.duration}ms` : '';
+
+      const toggleBtn = document.createElement('button');
+      toggleBtn.className = 'nm-toggle';
+      toggleBtn.textContent = '▶';
+      toggleBtn.title = 'Show request / response';
+
+      header.append(toggleBtn, statusSpan, methodSpan, urlSpan, durSpan);
+
+      // Body panel — hidden until toggled
+      const panel = document.createElement('div');
+      panel.className = 'nm-panel';
+      panel.hidden = true;
+
+      function makeSection(label, data) {
+        if (data === '' || data == null) return null;
+        const wrap = document.createElement('div');
+        wrap.className = 'nm-section';
+        const lbl = document.createElement('div');
+        lbl.className = 'nm-section-label';
+        lbl.textContent = label;
+        const pre = document.createElement('pre');
+        pre.className = 'nm-pre';
+        pre.textContent = typeof data === 'object'
+          ? JSON.stringify(data, null, 2)
+          : String(data);
+        wrap.append(lbl, pre);
+        return wrap;
+      }
+
+      const reqSection  = makeSection('Request Body', r.requestBody);
+      const respSection = makeSection('Response Body', r.responseBody);
+      if (reqSection)  panel.appendChild(reqSection);
+      if (respSection) panel.appendChild(respSection);
+      if (!reqSection && !respSection) {
+        const empty = document.createElement('div');
+        empty.className = 'nm-empty';
+        empty.textContent = 'No body captured';
+        panel.appendChild(empty);
+      }
+
+      toggleBtn.addEventListener('click', () => {
+        panel.hidden = !panel.hidden;
+        toggleBtn.textContent = panel.hidden ? '▶' : '▼';
+        toggleBtn.classList.toggle('nm-toggle--open', !panel.hidden);
+      });
+
+      const entry = document.createElement('div');
+      entry.className = 'nm-entry';
+      entry.append(header, panel);
+      list.appendChild(entry);
+    });
+
+    $('netModal').removeAttribute('hidden');
+  }
+
+  function closeNetModal() {
+    $('netModal').setAttribute('hidden', '');
   }
 
   async function editStep(index, step) {
@@ -561,23 +716,37 @@
     await refresh();
   }
 
-  async function replay() {
+  async function togglePause() {
+    if (!recordingState.active) return;
+    const nextPaused = !recordingState.paused;
+    const res = await sendMsg('SET_PAUSED', { value: nextPaused });
+    if (res.ok) {
+      showStatus(nextPaused ? 'Recording paused.' : 'Recording resumed.');
+    } else {
+      showStatus(res.error || 'Failed to toggle pause.', true);
+    }
+    await refresh();
+  }
+
+  async function replay(startIndex) {
     if (!currentSession || !currentSession.steps || !currentSession.steps.length) {
       showStatus('Nothing to replay.', true);
       return;
     }
+    const start = startIndex | 0;
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab || tab.id == null) { showStatus('No active tab found.', true); return; }
     if (!/^https?:/.test(tab.url || '')) { showStatus('Cannot replay on this page type.', true); return; }
     const res = await sendMsg('START_REPLAY', {
       tabId: tab.id,
       urlPattern: currentSession.urlPattern || currentSession.url || '',
-      urlIsRegex: !!currentSession.urlIsRegex
+      urlIsRegex: !!currentSession.urlIsRegex,
+      startIndex: start
     });
     if (res.ok) {
       isReplaying = true;
-      setReplayProgress(0, currentSession.steps.length, '');
-      showStatus('Replaying…');
+      setReplayProgress(start, currentSession.steps.length, '');
+      showStatus(start > 0 ? `Replaying from step ${start + 1}…` : 'Replaying…');
       render();
     } else {
       showStatus('Failed to start replay.', true);
@@ -687,6 +856,7 @@
   // ------------------------------------------------------------- init
   document.addEventListener('DOMContentLoaded', async () => {
     $('startStopBtn').addEventListener('click', toggleRecording);
+    $('pauseBtn').addEventListener('click', togglePause);
     $('replayBtn').addEventListener('click', replay);
     $('stopReplayBtn').addEventListener('click', stopReplay);
     $('exportBtn').addEventListener('click', exportJson);
@@ -738,11 +908,19 @@
     $('confirmModal').addEventListener('click', (e) => {
       if (e.target === $('confirmModal')) closeConfirmModal(false);
     });
+
+    // Network modal
+    $('netModalCloseBtn').addEventListener('click', closeNetModal);
+    $('netModal').addEventListener('click', (e) => {
+      if (e.target === $('netModal')) closeNetModal();
+    });
+
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         if (!$('editModal').hidden) closeEditModal(null);
         if (!$('nameModal').hidden) closeNameModal(null);
         if (!$('confirmModal').hidden) closeConfirmModal(false);
+        if (!$('netModal').hidden) closeNetModal();
       }
     });
 

@@ -2,6 +2,9 @@
   'use strict';
   // Guard against double injection (declarative + executeScript fallback).
   if (window.__actionRecorderInjected) return;
+  // Guard against frames where chrome extension APIs are unavailable
+  // (e.g. cross-origin iframes where the extension context is not exposed).
+  if (typeof chrome === 'undefined' || !chrome.runtime) return;
   window.__actionRecorderInjected = true;
 
   // Returns true when the extension context is still valid.
@@ -20,6 +23,7 @@
 
   // ------------------------------------------------------------- state
   let recording = false;
+  let paused = false;   // when true, recording is temporarily suspended (no capture)
   let replaying = false;
   let lastHoverEl = null;
   let lastStepTime = 0;
@@ -177,6 +181,14 @@
       const allNz = Array.from(document.querySelectorAll('nz-select'));
       const idx = allNz.indexOf(el);
       return idx >= 0 ? `nz-select:nth-of-type(${idx + 1})` : getCssPath(el);
+    }
+
+    // For nz-date-picker: always target the <input> inside — the host element
+    // carries dynamic state classes (ant-picker-focused, ant-picker-status-error, etc.)
+    // that make it unreplayable. The inner input is the stable, injectable target.
+    if (tag === 'nz-date-picker' || el.classList.contains('ant-picker')) {
+      const inner = el.querySelector('input');
+      if (inner) return getBestSelector(inner);
     }
 
     const name = el.getAttribute('name');
@@ -343,7 +355,15 @@
     return `arSession__${suiteName}`;
   }
 
-  async function recordStep(step) {
+  // Serialize recordStep calls — without this, rapid clicks race on the
+  // read-modify-write of storage and later writes clobber earlier steps.
+  let recordQueue = Promise.resolve();
+  function recordStep(step) {
+    recordQueue = recordQueue.then(() => recordStepInner(step)).catch(() => {});
+    return recordQueue;
+  }
+
+  async function recordStepInner(step) {
     if (!ctxOk()) return;
 
     // A pending button click is waiting to see if a file picker opens.
@@ -353,7 +373,7 @@
       clearTimeout(pendingFileClickStep.commitTimer);
       const clickStep = pendingFileClickStep.step;
       pendingFileClickStep = null;
-      await recordStep(clickStep); // commit the deferred click
+      await recordStepInner(clickStep); // commit the deferred click
     }
 
     const now = Date.now();
@@ -381,11 +401,15 @@
     if (!session.steps) session.steps = [];
     if (!session.url) session.url = location.href;  // set from first step only
 
-    // If this is a fill step and the last step is also a fill on the same selector,
-    // update in place instead of appending (collapses rapid typing into one step).
+    // If this is a fill/date/datepick step and the last step is the same type
+    // on the same selector, update in place (collapses rapid typing into one step).
     const last = session.steps[session.steps.length - 1];
-    if (step.type === 'fill' && last && last.type === 'fill' && last.selector === step.selector) {
+    const isValueStep = step.type === 'fill' || step.type === 'date' || step.type === 'datepick';
+    const lastIsValueStep = last && (last.type === 'fill' || last.type === 'date' || last.type === 'datepick');
+    if (isValueStep && lastIsValueStep && last.selector === step.selector) {
       last.value = step.value;
+      last.text  = step.text || step.value;
+      last.type  = step.type; // upgrade type if changed (e.g. datepick → date)
       last.timestamp = step.timestamp;
       // keep the original delay (time from previous distinct action)
     } else {
@@ -397,14 +421,22 @@
   }
 
   function recordFill(el, force) {
-    if (!recording || replaying) return;
+    if (!recording || replaying || paused) return;
     const isCheck = el.type === 'checkbox' || el.type === 'radio';
     if (!force) {
       if (lastInputValues.get(el) === el.value) return; // unchanged since last record
     }
     lastInputValues.set(el, el.value);
+
+    // Detect date picker inputs — nz-date-picker / ant-picker wraps a plain <input>
+    // but the value is a formatted date string. Record as type 'date' so replay
+    // uses datepickElement (direct inject) instead of fillElement.
+    const isDatePicker = !!(el.closest && (
+      el.closest('nz-date-picker') || el.closest('.ant-picker')
+    ));
+
     recordStep({
-      type: 'fill',
+      type: isDatePicker ? 'date' : 'fill',
       selector: getBestSelector(el),
       name: el.getAttribute('name') || el.getAttribute('id') || '',
       value: isCheck ? String(el.checked) : String(el.value)
@@ -412,7 +444,7 @@
   }
 
   function handleClick(e) {
-    if (!recording || replaying) return;
+    if (!recording || replaying || paused) return;
     // Use the deepest element at the pointer position — e.target can be a
     // container when the real click lands on a child (text node, icon, etc.)
     let el = (typeof e.clientX === 'number' && typeof e.clientY === 'number')
@@ -454,6 +486,55 @@
     if (el.closest('nz-select, .ant-select')) {
       arLog('[AR:handleClick] suppressed — click inside nz-select / .ant-select trigger (not an option)');
       return;
+    }
+
+    // Ant Design date picker — intercept all clicks inside the picker panel/dropdown.
+    const pickerPanel = el.closest('.ant-picker-dropdown, .cdk-overlay-container .ant-picker-panel-container');
+    if (pickerPanel) {
+      // Date cell click — the td ancestor carries the full date in its title attribute
+      const cell = el.closest('td.ant-picker-cell');
+      if (cell) {
+        const dateTitle = cell.getAttribute('title') || trimmed(el.textContent);
+        // Find which picker INPUT triggered this panel
+        const openPicker = document.querySelector('nz-date-picker.ant-picker-focused, nz-date-picker .ant-picker-focused')
+          || document.querySelector('.ant-picker-focused input, .ant-picker-active input')
+          || document.querySelector('nz-date-picker input.ant-picker-input');
+        const triggerSelector = openPicker ? getBestSelector(
+          openPicker.closest('nz-date-picker') || openPicker
+        ) : '';
+        recordStep({
+          type: 'datepick',
+          selector: triggerSelector,
+          value: dateTitle,
+          text: dateTitle
+        });
+        arLog('[AR:handleClick] datepick recorded:', { triggerSelector, dateTitle });
+        return;
+      }      // Navigation clicks (prev/next year/month, header year/month btn) — suppress.
+      // Since replay injects the date value directly, nav clicks are never replayed.
+      const navEl = el.closest(
+        '.ant-picker-header-year-btn, .ant-picker-header-month-btn, ' +
+        '.ant-picker-super-prev-icon, .ant-picker-super-next-icon, ' +
+        '.ant-picker-prev-icon, .ant-picker-next-icon, ' +
+        '.ant-picker-header button'
+      );
+      if (navEl) {
+        arLog('[AR:handleClick] suppressed — picker nav click (not needed with direct inject)');
+        return;
+      }
+      // Other picker panel clicks — skip, they're noise
+      arLog('[AR:handleClick] suppressed — click inside picker panel (not a cell or nav)');
+      return;
+    }
+
+    // Suppress the INPUT click that opens a date picker — replay will open it
+    // before replaying the datepick step.
+    if (el.tagName === 'INPUT') {
+      const pickerInput = el.closest('nz-date-picker, .ant-picker');
+      if (pickerInput) {
+        arLog('[AR:handleClick] suppressed — ant-picker INPUT open click (handled by datepick replay)');
+        return;
+      }
     }
 
     const tag = el.tagName;
@@ -635,7 +716,7 @@
   }
 
   function handleInput(e) {
-    if (!recording || replaying) return;
+    if (!recording || replaying || paused) return;
     const el = e.target;
     if (!(el instanceof Element)) return;
     // Skip file inputs — their value is "C:\fakepath\..." which is not replayable.
@@ -647,7 +728,7 @@
   }
 
   function handleChange(e) {
-    if (!recording || replaying) return;
+    if (!recording || replaying || paused) return;
     const el = e.target;
     if (!(el instanceof Element)) return;
     if (el.tagName === 'SELECT') {
@@ -911,6 +992,8 @@
     } else if (!value && recording) {
       recording = false;
       detachListeners();
+      // Ensure any queued step writes flush before the session is considered done.
+      recordQueue.catch(() => {});
     }
   }
 
@@ -1321,7 +1404,23 @@
     return el;
   }
 
-  // Returns true when el is a layout container that has no interactive role
+  // Compare two URLs ignoring query string, hash, and duplicate slashes in path —
+  // used for frame ownership checks so ?fake_api=true params and double-slash
+  // artifacts (e.g. recorded as http://host//path) don't cause mismatches.
+  function urlPathMatches(a, b) {
+    if (!a || !b) return false;
+    try {
+      const ua = new URL(a);
+      const ub = new URL(b);
+      // Normalize pathname: collapse repeated slashes, strip trailing slash
+      const normPath = (p) => p.replace(/\/\/+/g, '/').replace(/\/$/, '');
+      return ua.origin === ub.origin &&
+        normPath(ua.pathname) === normPath(ub.pathname);
+    } catch {
+      const strip = (s) => s.split('?')[0].split('#')[0].replace(/\/\/+/g, '/').replace(/\/$/, '');
+      return strip(a) === strip(b);
+    }
+  }
   // and was only recorded because of event bubbling (e.g. sticky-left-menu sidebar).
   // During replay these should trigger hover only — not a click.
   function isLayoutContainer(el) {
@@ -1336,7 +1435,51 @@
 
   let replayCancel = false;
 
-  async function runReplay(urlPattern, urlIsRegex) {
+  // Replay an Ant Design date picker by directly injecting the date value into
+  // the picker's input — no panel opening, no cell clicking, no navigation.
+  // Uses the same native-setter + event dispatch trick as fillElement so that
+  // Angular's ControlValueAccessor picks up the change.
+  async function datepickElement(triggerEl, step) {
+    const dateValue = step.value || step.text || '';
+    if (!dateValue) { arWarn('[AR:datepick] no date value in step'); return; }
+
+    // Find the input inside the nz-date-picker / ant-picker host
+    const host = triggerEl || document.querySelector('nz-date-picker, .ant-picker');
+    if (!host) { arWarn('[AR:datepick] no picker host found'); return; }
+
+    const input = host.querySelector('input') || (host.tagName === 'INPUT' ? host : null);
+    if (!input) { arWarn('[AR:datepick] no input inside picker host'); return; }
+
+    host.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    flash(host);
+    input.focus();
+
+    // Inject value via native setter so Angular's value accessor detects it
+    const proto = HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(input, dateValue);
+    else input.value = dateValue;
+
+    input.dispatchEvent(new Event('input',  { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await waitFor(100);
+    input.dispatchEvent(new FocusEvent('focusout', { bubbles: true, cancelable: true, relatedTarget: null }));
+    input.dispatchEvent(new FocusEvent('blur',     { bubbles: false, cancelable: false, relatedTarget: null }));
+    input.blur();
+
+    // Press Enter to confirm — nz-date-picker confirms on Enter
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', keyCode: 13, bubbles: true }));
+
+    // Close any open panel by pressing Escape
+    await waitFor(100);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+    arLog('[AR:datepick] injected date value:', dateValue, 'into', input);
+    await waitFor(200);
+  }
+
+  async function runReplay(urlPattern, urlIsRegex, startIndex) {
     if (!ctxOk()) return;
 
     // Read the active suite's session first — we need session.url to decide
@@ -1361,11 +1504,7 @@
     //  3. If no urlPattern either, the top frame (IS_IFRAME === false) runs it.
     const sessionUrl = session.url || '';
     if (sessionUrl) {
-      const frameMatchesSession =
-        location.href === sessionUrl ||
-        location.href.startsWith(sessionUrl);
-      if (!frameMatchesSession) {
-        // This frame doesn't own these steps — skip silently.
+      if (!urlPathMatches(location.href, sessionUrl)) {
         arLog('[AR:runReplay] skipping — session URL is', sessionUrl, ', this frame is', location.href);
         return;
       }
@@ -1415,7 +1554,13 @@
     safeSend({ type: 'REPLAY_STARTED' });
 
     const steps = session.steps;
-    for (let i = 0; i < steps.length; i++) {
+    // Start from the requested step index (0-based). Clamp to valid range.
+    const start = Math.min(Math.max(0, startIndex | 0), Math.max(0, steps.length - 1));
+    if (start > 0) {
+      arLog(`[AR:runReplay] starting from step ${start + 1} (skipping ${start} step(s))`);
+      safeSend({ type: 'REPLAY_EVENT', data: { level: 'info', step: start + 1, text: `Starting from step ${start + 1}` } });
+    }
+    for (let i = start; i < steps.length; i++) {
       if (replayCancel) break;
       const step = steps[i];
 
@@ -1484,6 +1629,7 @@
           else if (step.type === 'fill') await fillElement(found, step);
           else if (step.type === 'select') await selectElement(found, step);
           else if (step.type === 'file') await openFileInput(found, step, i + 1);
+          else if (step.type === 'datepick' || step.type === 'date') await datepickElement(found, step);
         } catch (err) {
           safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: i + 1, text: `Step ${i + 1} failed: ${err}` } });
         }
@@ -1512,6 +1658,14 @@
             arLog(`[AR:replay] step ${i + 1} — layout container, hover-only (no click)`);
             dispatchHoverChain(el);
             await waitFor(400); // give Angular time to expand
+          } else if (step.pickerNav) {
+            // Picker nav click — wait for the panel to be open first
+            let panelOpen = false;
+            for (let w = 0; w < 10; w++) {
+              if (document.querySelector('.ant-picker-dropdown:not(.ant-picker-dropdown-hidden)')) { panelOpen = true; break; }
+              await waitFor(200);
+            }
+            clickElement(el);
           } else {
             clickElement(el);
           }
@@ -1519,6 +1673,7 @@
         else if (step.type === 'fill') await fillElement(el, step);
         else if (step.type === 'select') await selectElement(el, step);
         else if (step.type === 'file') await openFileInput(el, step, i + 1);
+        else if (step.type === 'datepick' || step.type === 'date') await datepickElement(el, step);
       } catch (err) {
         safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: i + 1, text: `Step ${i + 1} failed: ${err}` } });
       }
@@ -1530,9 +1685,9 @@
   }
 
   // ------------------------------------------------------------- messaging
-  function setReplay(value, urlPattern, urlIsRegex) {
+  function setReplay(value, urlPattern, urlIsRegex, startIndex) {
     if (value) {
-      if (!replaying) runReplay(urlPattern, urlIsRegex);
+      if (!replaying) runReplay(urlPattern, urlIsRegex, startIndex);
     } else {
       replayCancel = true;
       replaying = false;
@@ -1553,10 +1708,7 @@
     // Only the frame whose location.href matches step.url should execute it.
     // Other frames bail silently so only one frame runs each step.
     if (step.url) {
-      const frameMatches =
-        location.href === step.url ||
-        location.href.startsWith(step.url);
-      if (!frameMatches) {
+      if (!urlPathMatches(location.href, step.url)) {
         arLog('[AR:runSingleStep] skipping — step.url is', step.url, ', this frame is', location.href);
         return;
       }
@@ -1619,6 +1771,8 @@
           await selectElement(el, step);
         } else if (step.type === 'file') {
           await openFileInput(el, step, stepIndex + 1);
+        } else if (step.type === 'datepick' || step.type === 'date') {
+          await datepickElement(el, step);
         }
       } catch (err) {
         safeSend({ type: 'REPLAY_EVENT', data: { level: 'error', step: stepIndex + 1, text: `Step ${stepIndex + 1} failed: ${err}` } });
@@ -1633,9 +1787,14 @@
     if (!ctxOk()) return;
     if (message.type === 'SET_RECORDING') {
       setRecording(!!message.value);
+      if (!message.value) paused = false; // clear pause when recording stops
+      sendResponse({ ok: true });
+    } else if (message.type === 'SET_PAUSED') {
+      paused = !!message.value;
+      arLog('[AR] recording', paused ? 'paused' : 'resumed');
       sendResponse({ ok: true });
     } else if (message.type === 'SET_REPLAY') {
-      setReplay(!!message.value, message.urlPattern, message.urlIsRegex);
+      setReplay(!!message.value, message.urlPattern, message.urlIsRegex, message.startIndex);
       sendResponse({ ok: true });
     } else if (message.type === 'SET_HIDE_LOG') {
       arLogEnabled = !message.value; // value=true means hide → disable logging
@@ -1652,6 +1811,7 @@
     const { arRecording } = await storageGet('arRecording');
     if (arRecording && arRecording.active && !recording) {
       setRecording(true);
+      paused = !!arRecording.paused; // restore pause state across page navigations
       // Session may have started on a previous page: keep the URL fresh.
       const { arActiveSuite } = await storageGet('arActiveSuite');
       const suiteName = arActiveSuite || 'suite1';

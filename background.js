@@ -54,6 +54,217 @@ async function getActiveSuite() {
   return { active, suites };
 }
 
+// ------------------------------------------------------------- network capture
+// While recording is active we buffer every completed XHR/fetch request for
+// the recording tab. When a STEP_RECORDED message arrives from the content
+// script we drain all requests that finished AFTER the previous step's
+// timestamp and attach them as step.networkRequests = [...].
+//
+// Each entry: { url, method, status, duration, timestamp, requestBody, responseBody }
+// We skip browser-internal URLs, extension URLs, and static assets
+// (images, fonts, css, js) to keep the list focused on API calls.
+
+const netBuffer = [];   // { url, method, status, duration, timestamp, requestBody, responseBody }
+const pendingRequests = new Map(); // requestId → { url, method, startTime, requestBody }
+let netRecordingTabId = null;
+let lastStepTimestamp = 0;
+
+// Map of requestId → responseBody string, populated by debugger events.
+const responseBodyMap = new Map();
+// Map of requestId → resolve function waiting for response body
+const responseBodyWaiters = new Map();
+
+const ASSET_EXT = /\.(png|jpg|jpeg|gif|svg|ico|webp|woff2?|ttf|eot|css|js|map)(\?.*)?$/i;
+
+function shouldCaptureUrl(url) {
+  if (!url) return false;
+  if (url.startsWith('chrome-extension://')) return false;
+  if (url.startsWith('chrome://')) return false;
+  if (ASSET_EXT.test(url.split('?')[0])) return false;
+  return true;
+}
+
+// ----- debugger-based response body capture -----
+let debuggerAttached = false;
+
+async function attachDebugger(tabId) {
+  if (debuggerAttached) return;
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3');
+    await chrome.debugger.sendCommand({ tabId }, 'Network.enable', {});
+    debuggerAttached = true;
+
+    chrome.debugger.onEvent.addListener(onDebuggerEvent);
+    chrome.debugger.onDetach.addListener(() => {
+      debuggerAttached = false;
+      chrome.debugger.onEvent.removeListener(onDebuggerEvent);
+    });
+  } catch (e) {
+    // Debugger may already be attached by DevTools — fall back gracefully
+    debuggerAttached = false;
+  }
+}
+
+async function detachDebugger(tabId) {
+  if (!debuggerAttached) return;
+  try {
+    chrome.debugger.onEvent.removeListener(onDebuggerEvent);
+    await chrome.debugger.detach({ tabId });
+  } catch {}
+  debuggerAttached = false;
+}
+
+function onDebuggerEvent(source, method, params) {
+  if (method === 'Network.loadingFinished' || method === 'Network.responseReceived') {
+    const requestId = params && params.requestId;
+    if (!requestId) return;
+    // Fetch response body asynchronously and store it
+    chrome.debugger.sendCommand(source, 'Network.getResponseBody', { requestId })
+      .then(result => {
+        const body = result && result.body ? result.body : '';
+        responseBodyMap.set(requestId, body);
+        // Resolve any waiter for this requestId
+        const waiter = responseBodyWaiters.get(requestId);
+        if (waiter) { waiter(body); responseBodyWaiters.delete(requestId); }
+      })
+      .catch(() => {
+        responseBodyMap.set(requestId, '');
+      });
+  }
+}
+
+// Wait up to 2s for the response body of a requestId to be fetched by debugger
+function waitForResponseBody(requestId) {
+  if (responseBodyMap.has(requestId)) {
+    return Promise.resolve(responseBodyMap.get(requestId));
+  }
+  return new Promise(resolve => {
+    responseBodyWaiters.set(requestId, resolve);
+    setTimeout(() => {
+      responseBodyWaiters.delete(requestId);
+      resolve(responseBodyMap.get(requestId) || '');
+    }, 2000);
+  });
+}
+
+function startNetCapture(tabId) {
+  stopNetCapture(); // remove any previous listeners first
+  netRecordingTabId = tabId;
+  netBuffer.length = 0;
+  pendingRequests.clear();
+  responseBodyMap.clear();
+  responseBodyWaiters.clear();
+  lastStepTimestamp = 0;
+
+  chrome.webRequest.onBeforeRequest.addListener(
+    onBeforeRequest,
+    { urls: ['<all_urls>'], tabId },
+    ['requestBody']
+  );
+  chrome.webRequest.onCompleted.addListener(
+    onCompleted,
+    { urls: ['<all_urls>'], tabId },
+    ['responseHeaders']
+  );
+  chrome.webRequest.onErrorOccurred.addListener(
+    onErrorOccurred,
+    { urls: ['<all_urls>'], tabId },
+    []
+  );
+
+  attachDebugger(tabId);
+}
+
+function stopNetCapture() {
+  try { chrome.webRequest.onBeforeRequest.removeListener(onBeforeRequest); } catch {}
+  try { chrome.webRequest.onCompleted.removeListener(onCompleted); } catch {}
+  try { chrome.webRequest.onErrorOccurred.removeListener(onErrorOccurred); } catch {}
+  if (netRecordingTabId != null) detachDebugger(netRecordingTabId);
+  netRecordingTabId = null;
+  pendingRequests.clear();
+  responseBodyMap.clear();
+  responseBodyWaiters.clear();
+}
+
+function extractRequestBody(details) {
+  try {
+    const rb = details.requestBody;
+    if (!rb) return '';
+    if (rb.raw && rb.raw.length > 0) {
+      const bytes = rb.raw[0].bytes;
+      if (bytes) return new TextDecoder().decode(bytes);
+    }
+    if (rb.formData) return JSON.stringify(rb.formData);
+  } catch {}
+  return '';
+}
+
+function onBeforeRequest(details) {
+  if (!shouldCaptureUrl(details.url)) return;
+  pendingRequests.set(details.requestId, {
+    url: details.url,
+    method: details.method,
+    startTime: details.timeStamp,
+    requestBody: extractRequestBody(details)
+  });
+}
+
+// onCompleted MUST be synchronous — Chrome ignores the return value of async
+// webRequest listeners. Push to netBuffer immediately, then fill response body
+// asynchronously by patching the existing entry in-place.
+function onCompleted(details) {
+  const pending = pendingRequests.get(details.requestId);
+  pendingRequests.delete(details.requestId);
+  if (!pending || !shouldCaptureUrl(details.url)) return;
+
+  // Parse request body now (sync)
+  let parsedRequest = pending.requestBody;
+  try { if (parsedRequest) parsedRequest = JSON.parse(pending.requestBody); } catch {}
+
+  const entry = {
+    url: details.url,
+    method: details.method || pending.method,
+    status: details.statusCode,
+    duration: Math.round(details.timeStamp - pending.startTime),
+    timestamp: details.timeStamp,
+    requestBody: parsedRequest || '',
+    responseBody: ''   // filled in async below
+  };
+  netBuffer.push(entry);
+
+  // Fill response body asynchronously without blocking the listener
+  waitForResponseBody(details.requestId).then(body => {
+    responseBodyMap.delete(details.requestId);
+    let parsed = body;
+    try { parsed = JSON.parse(body); } catch {}
+    entry.responseBody = parsed || '';
+  }).catch(() => {});
+}
+
+function onErrorOccurred(details) {
+  const pending = pendingRequests.get(details.requestId);
+  pendingRequests.delete(details.requestId);
+  if (!pending || !shouldCaptureUrl(details.url)) return;
+  netBuffer.push({
+    url: details.url,
+    method: details.method || pending.method,
+    status: 0,
+    error: details.error,
+    duration: Math.round(details.timeStamp - pending.startTime),
+    timestamp: details.timeStamp,
+    requestBody: pending.requestBody || '',
+    responseBody: ''
+  });
+}
+
+// Drain requests that completed AFTER `sinceTimestamp` and return them.
+// Removes drained entries from the buffer.
+function drainRequests(sinceTimestamp) {
+  const taken = netBuffer.filter(r => r.timestamp >= sinceTimestamp);
+  netBuffer.splice(0, netBuffer.length, ...netBuffer.filter(r => r.timestamp < sinceTimestamp));
+  return taken;
+}
+
 // ------------------------------------------------------------- recording
 
 async function startRecording(tabId) {
@@ -82,6 +293,8 @@ async function startRecording(tabId) {
   await chrome.storage.local.set({
     arRecording: { active: true, tabId, url: tab.url, startedAt: Date.now() }
   });
+  startNetCapture(tabId);
+  lastStepTimestamp = Date.now(); // treat recording start as t=0 for first step window
   return { ok: true };
 }
 
@@ -89,6 +302,14 @@ async function stopRecording() {
   const { arRecording, arActiveSuite } = await chrome.storage.local.get(['arRecording', 'arActiveSuite']);
   const suiteName = arActiveSuite || 'suite1';
   const key = suiteKey(suiteName);
+
+  // Tell content scripts to stop FIRST, then wait for their in-flight step
+  // writes (the serialized recordQueue) to flush before we read the session
+  // and stamp endedAt. Without this wait, a final click recorded right before
+  // stop can be clobbered by our endedAt write.
+  broadcast({ type: 'SET_RECORDING', value: false });
+  stopNetCapture();
+  await new Promise(r => setTimeout(r, 600));
 
   if (arRecording && arRecording.active) {
     const stored = await chrome.storage.local.get(key);
@@ -100,8 +321,19 @@ async function stopRecording() {
   await chrome.storage.local.set({
     arRecording: { active: false, tabId: null, url: '', startedAt: 0 }
   });
-  broadcast({ type: 'SET_RECORDING', value: false });
   return { ok: true };
+}
+
+// Pause / resume recording without ending the session.
+async function setPaused(paused) {
+  const { arRecording } = await chrome.storage.local.get('arRecording');
+  if (!arRecording || !arRecording.active) {
+    return { ok: false, error: 'Not currently recording.' };
+  }
+  arRecording.paused = !!paused;
+  await chrome.storage.local.set({ arRecording });
+  await broadcast({ type: 'SET_PAUSED', value: !!paused });
+  return { ok: true, paused: !!paused };
 }
 
 async function broadcast(message) {
@@ -113,8 +345,8 @@ async function broadcast(message) {
 
 // ------------------------------------------------------------- replay
 
-async function startReplay(tabId, urlPattern, urlIsRegex) {
-  const msg = { type: 'SET_REPLAY', value: true, urlPattern: urlPattern || '', urlIsRegex: !!urlIsRegex };
+async function startReplay(tabId, urlPattern, urlIsRegex, startIndex) {
+  const msg = { type: 'SET_REPLAY', value: true, urlPattern: urlPattern || '', urlIsRegex: !!urlIsRegex, startIndex: startIndex | 0 };
   if (!await sendToAllFrames(tabId, msg)) {
     await ensureContentScript(tabId);
     await sendToAllFrames(tabId, msg);
@@ -319,8 +551,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'STOP_RECORDING':
         sendResponse(await stopRecording());
         break;
+      case 'SET_PAUSED':
+        sendResponse(await setPaused(message.value));
+        break;
       case 'START_REPLAY':
-        sendResponse(await startReplay(message.tabId, message.urlPattern, message.urlIsRegex));
+        sendResponse(await startReplay(message.tabId, message.urlPattern, message.urlIsRegex, message.startIndex));
         break;
       case 'STOP_REPLAY':
         sendResponse(await stopReplay());
@@ -373,7 +608,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       // Events from content scripts — relay to the popup if open.
-      case 'STEP_RECORDED':
+      case 'STEP_RECORDED': {
+        // Attach network requests that fired since the previous step to this step.
+        const step = message.data;
+        if (step && typeof step.timestamp === 'number') {
+          const captureFrom = lastStepTimestamp;
+          lastStepTimestamp = step.timestamp;
+
+          // Wait 1.5s for any in-flight requests triggered by this action to complete
+          // before draining. Without this, fast API responses land after drainRequests()
+          // and get attributed to the wrong step or dropped entirely.
+          await new Promise(r => setTimeout(r, 1500));
+
+          const requests = drainRequests(captureFrom);
+
+          if (requests.length > 0) {
+            const { arActiveSuite } = await chrome.storage.local.get('arActiveSuite');
+            const sk = suiteKey(arActiveSuite || 'suite1');
+            const stored = await chrome.storage.local.get(sk);
+            const session = stored[sk];
+            if (session && Array.isArray(session.steps) && session.steps.length > 0) {
+              // Find the step by timestamp (not just last — fill steps may collapse)
+              const idx = session.steps.findLastIndex(s => s.timestamp === step.timestamp)
+                ?? session.steps.length - 1;
+              const target = session.steps[idx >= 0 ? idx : session.steps.length - 1];
+              target.networkRequests = requests;
+              await chrome.storage.local.set({ [sk]: session });
+              message.data = target;
+            }
+          }
+        }
+        chrome.runtime.sendMessage(message).catch(() => {});
+        sendResponse({ ok: true });
+        break;
+      }
       case 'REPLAY_STARTED':
       case 'REPLAY_STEP':
       case 'REPLAY_FINISHED':

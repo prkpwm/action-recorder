@@ -18,6 +18,8 @@
     --select-text: #7c3aed;
     --file-bg: #fff7ed;
     --file-text: #c2410c;
+    --date-bg: #ecfdf5;
+    --date-text: #065f46;
     --font: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
@@ -95,6 +97,12 @@ h3 {
     gap: 8px;
 }
 
+/* The hidden attribute must win over .btn's display:inline-flex */
+.btn[hidden],
+.row[hidden] {
+    display: none !important;
+}
+
 .btn {
     flex: 1;
     display: inline-flex;
@@ -132,6 +140,17 @@ h3 {
 .btn.primary.recording {
     background: var(--danger);
     border-color: var(--danger);
+}
+
+#pauseBtn {
+    margin-top: 8px;
+    background: #f59e0b;
+    border-color: #f59e0b;
+    color: #fff;
+}
+#pauseBtn.paused {
+    background: var(--accent);
+    border-color: var(--accent);
 }
 
 .btn.accent {
@@ -272,6 +291,11 @@ h3 {
     color: var(--file-text);
 }
 
+.badge.b-date {
+    background: var(--date-bg);
+    color: var(--date-text);
+}
+
 .step-body {
     min-width: 0;
     flex: 1;
@@ -290,6 +314,26 @@ h3 {
     color: var(--subtle);
     word-break: break-all;
     margin-top: 1px;
+}
+
+/* ------------------------------------------------------------- network capture — step button */
+.step-btn--net {
+    background: #eef2ff;
+    border-color: #c7d2fe;
+    color: #4f46e5;
+    gap: 3px;
+    padding: 0 5px;
+    min-width: 0;
+}
+.step-btn--net:hover {
+    background: #4f46e5;
+    border-color: #4f46e5;
+    color: #fff;
+}
+.net-btn-count {
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
 }
 
 .msg {
@@ -540,12 +584,49 @@ h3 {
     color: #fff;
 }
 
+.step-btn--playfrom:hover {
+    background: #0891b2;
+    border-color: #0891b2;
+    color: #fff;
+}
+
 .step-btn--del:hover {
     background: var(--danger);
     border-color: var(--danger);
     color: #fff;
 }
 /* ---- Live hover selector strip removed (shown on-page overlay instead) ---- */
+
+/* ---- Shared status / method / dur chips (used in net modal) ---- */
+.net-status {
+    font-weight: 700;
+    font-size: 10px;
+    border-radius: 3px;
+    padding: 1px 5px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.net-ok   { background: #dcfce7; color: #15803d; }
+.net-warn { background: #fef9c3; color: #a16207; }
+.net-err  { background: #fee2e2; color: #b91c1c; }
+
+.net-method {
+    font-weight: 700;
+    color: #7c3aed;
+    font-size: 10px;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.net-dur {
+    color: var(--subtle);
+    font-size: 10px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+}
 
 /* ---- Inline step edit modal ---- */
 .modal {
@@ -769,4 +850,147 @@ h3 {
     background: var(--primary);
     border-color: var(--primary);
     color: #fff;
+}
+
+/* ---- Network modal ---- */
+.net-modal-box {
+    width: 520px;
+    max-width: calc(100vw - 32px);
+    max-height: 80vh;
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.net-modal-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.net-modal-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+}
+
+.net-modal-sel {
+    font-family: Consolas, Monaco, 'Courier New', monospace;
+    font-size: 11px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.net-modal-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--subtle);
+    font-size: 14px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+.net-modal-close:hover { background: var(--border); color: var(--text); }
+
+.net-modal-list {
+    overflow-y: auto;
+    flex: 1;
+    padding: 6px 0;
+}
+
+/* ---- Each request entry in the modal ---- */
+.nm-entry {
+    border-bottom: 1px solid var(--border);
+}
+.nm-entry:last-child { border-bottom: none; }
+
+.nm-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 14px;
+    cursor: default;
+}
+
+.nm-toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--subtle);
+    font-size: 9px;
+    padding: 1px 3px;
+    border-radius: 3px;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: color 0.1s;
+}
+.nm-toggle:hover { color: var(--text); }
+.nm-toggle--open { color: var(--primary); }
+
+.nm-url {
+    font-family: Consolas, Monaco, 'Courier New', monospace;
+    font-size: 10px;
+    color: var(--text);
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ---- Expanded body panel ---- */
+.nm-panel {
+    padding: 0 14px 8px 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.nm-section {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.nm-section-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.nm-pre {
+    margin: 0;
+    padding: 6px 8px;
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    font-family: Consolas, Monaco, 'Courier New', monospace;
+    font-size: 10px;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 160px;
+    overflow-y: auto;
+    line-height: 1.5;
+}
+
+.nm-empty {
+    font-size: 11px;
+    color: var(--subtle);
+    font-style: italic;
+    padding: 2px 0 4px;
 }

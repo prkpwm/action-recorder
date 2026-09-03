@@ -55,13 +55,14 @@
 
         <div class="controls">
             <button id="startStopBtn" class="btn primary">▶ Start Recording</button>
+            <button id="pauseBtn" class="btn" title="Pause / resume capturing without ending the session" hidden>⏸ Pause</button>
 
-            <div class="row">
+            <div class="row" id="replayRow">
                 <button id="replayBtn" class="btn" title="Replay the recorded steps on the active tab">▶ Replay</button>
                 <button id="stopReplayBtn" class="btn" title="Stop the running replay">⏹ Stop Replay</button>
             </div>
 
-            <div class="row">
+            <div class="row" id="exportRow">
                 <button id="exportBtn" class="btn accent" title="Download the active suite as a JSON file">⬇ Export JSON</button>
                 <button id="clearBtn" class="btn danger" title="Clear recorded steps for the active suite">🗑 Clear</button>
             </div>
@@ -146,6 +147,20 @@
                 <button id="confirmModalCancelBtn" class="btn">Cancel</button>
                 <button id="confirmModalOkBtn" class="btn danger-solid">Delete</button>
             </div>
+        </div>
+    </div>
+
+    <!-- Network requests modal -->
+    <div id="netModal" class="modal" hidden>
+        <div class="modal-box net-modal-box">
+            <div class="net-modal-header">
+                <div class="net-modal-title">
+                    <span id="netModalBadge" class="badge"></span>
+                    <span id="netModalSelector" class="net-modal-sel"></span>
+                </div>
+                <button id="netModalCloseBtn" class="net-modal-close" title="Close">✕</button>
+            </div>
+            <div id="netModalList" class="net-modal-list"></div>
         </div>
     </div>
 
